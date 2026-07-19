@@ -49,7 +49,7 @@ def main():
             "OPTOCAM_HOME": home,
             "OPTOCAM_WHISPLAY_BACKEND": "daemon",
         },
-        "exit_gesture": "quad_click",
+        "exit_gesture": "none",
         "priority": 50,
         "use_daemon_default_log": True,
         "persist": True,

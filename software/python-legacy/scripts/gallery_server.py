@@ -6,9 +6,35 @@ import json
 import time
 import zipfile
 import tempfile
+import threading
+import resource
+
+# Some Whisplay images boot with ``cgroup_disable=memory``, which makes
+# systemd's MemoryMax= unavailable.  Keep an in-process address-space limit as
+# a second line of defence so a malformed/high-resolution image can stop only
+# the gallery instead of starving PID 1 and tripping the hardware watchdog.
+GALLERY_MAX_AS_MB = int(os.getenv("OPTOCAM_GALLERY_MAX_AS_MB", "0"))
+if GALLERY_MAX_AS_MB > 0:
+    max_as_bytes = GALLERY_MAX_AS_MB * 1024 * 1024
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (max_as_bytes, max_as_bytes))
+    except (OSError, ValueError):
+        # MemoryMax still protects installations whose kernel has memcg.
+        pass
+
 from flask import Flask, send_from_directory, render_template_string, Response, request
 
-PHOTOS_DIR = "/home/dkumkum/photos"
+OPTOCAM_HOME = os.path.abspath(os.getenv("OPTOCAM_HOME", "/home/dkumkum"))
+PHOTOS_DIR = os.path.abspath(os.getenv(
+    "OPTOCAM_PHOTOS_DIR", os.path.join(OPTOCAM_HOME, "photos")
+))
+GALLERY_PORT = int(os.getenv("OPTOCAM_GALLERY_PORT", "80"))
+GALLERY_PRELOAD = os.getenv("OPTOCAM_GALLERY_PRELOAD", "1").lower() not in {
+    "0", "false", "no", "off"
+}
+GALLERY_THREADED = os.getenv("OPTOCAM_GALLERY_THREADED", "1").lower() not in {
+    "0", "false", "no", "off"
+}
 
 MEDIA_EXTS = (".jpg", ".gif")
 
@@ -1754,7 +1780,7 @@ document.addEventListener('mouseup', e => {
 
 def get_free_space():
     try:
-        path = PHOTOS_DIR if os.path.exists(PHOTOS_DIR) else "/home/dkumkum"
+        path = PHOTOS_DIR if os.path.exists(PHOTOS_DIR) else OPTOCAM_HOME
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_bsize
         if free >= 1024 ** 3:
@@ -1792,12 +1818,12 @@ def index():
 
 @app.route("/logo")
 def logo():
-    return send_from_directory("/home/dkumkum", "optocamlogo.svg", mimetype="image/svg+xml")
+    return send_from_directory(OPTOCAM_HOME, "optocamlogo.svg", mimetype="image/svg+xml")
 
 
 @app.route("/font/<filename>")
 def font(filename):
-    return send_from_directory("/home/dkumkum", filename)
+    return send_from_directory(OPTOCAM_HOME, filename)
 
 
 @app.route("/photo/<filename>")
@@ -1806,10 +1832,49 @@ def photo(filename):
 
 
 THUMB_DIR = os.path.join(PHOTOS_DIR, ".thumbs")
+THUMBNAIL_LOCK = threading.Lock()
 
 def get_thumb_path(filename, size):
     os.makedirs(THUMB_DIR, exist_ok=True)
     return os.path.join(THUMB_DIR, f"{filename}_{size}.jpg")
+
+def ensure_thumbnail(path, cache_path, size, is_gif=False):
+    """Create one thumbnail at a time with JPEG decoder downsampling.
+
+    Pi Zero 2 W has very little free RAM while the camera is active. Browser
+    grids request many thumbnails concurrently; serializing them and asking
+    libjpeg to decode near the target size prevents full-resolution images from
+    being resident several times at once.
+    """
+    with THUMBNAIL_LOCK:
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            return True
+        from PIL import Image
+        tmp = None
+        try:
+            with Image.open(path) as source:
+                if is_gif:
+                    source.seek(0)
+                else:
+                    source.draft("RGB", (size, size))
+                img = source.convert("RGB")
+                img.thumbnail((size, size))
+                tmp = tempfile.NamedTemporaryFile(
+                    dir=THUMB_DIR, delete=False, suffix=".tmp"
+                )
+                img.save(tmp, "JPEG", quality=75)
+                tmp.close()
+                os.chmod(tmp.name, 0o644)
+                os.replace(tmp.name, cache_path)
+            return True
+        except Exception:
+            if tmp is not None:
+                try:
+                    tmp.close()
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+            return False
 
 def _gif_complete(path):
     """A fully-written GIF ends with the trailer byte 0x3B. The camera encodes
@@ -1841,23 +1906,8 @@ def thumb(filename):
         return resp
     size = min(request.args.get('size', 400, type=int), 1200)
     cache_path = get_thumb_path(filename, size)
-    if not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
-        from PIL import Image
-        img = Image.open(path)
-        if is_gif:
-            img.seek(0)                 # poster = first frame
-        img = img.convert("RGB")        # GIFs are mode "P"; JPEG needs RGB
-        img.thumbnail((size, size))
-        tmp = tempfile.NamedTemporaryFile(dir=THUMB_DIR, delete=False, suffix='.tmp')
-        try:
-            img.save(tmp, "JPEG", quality=75)
-            tmp.close()
-            os.chmod(tmp.name, 0o644)
-            os.replace(tmp.name, cache_path)
-        except:
-            tmp.close()
-            os.unlink(tmp.name)
-            return "Error", 500
+    if not ensure_thumbnail(path, cache_path, size, is_gif):
+        return "Error", 500
     with open(cache_path, "rb") as f:
         return Response(f.read(), mimetype="image/jpeg")
 
@@ -1884,8 +1934,8 @@ def gif_full(filename):
 
 @app.route("/preload")
 def preload():
-    import threading
-    from PIL import Image as PILImage
+    if not GALLERY_PRELOAD:
+        return "", 204
     def generate_all():
         if not os.path.exists(PHOTOS_DIR):
             return
@@ -1895,16 +1945,9 @@ def preload():
             cache_path = get_thumb_path(filename, 1200)
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 continue
-            try:
-                img = PILImage.open(os.path.join(PHOTOS_DIR, filename))
-                img.thumbnail((1200, 1200))
-                tmp = tempfile.NamedTemporaryFile(dir=THUMB_DIR, delete=False, suffix='.tmp')
-                img.save(tmp, "JPEG", quality=75)
-                tmp.close()
-                os.chmod(tmp.name, 0o644)
-                os.replace(tmp.name, cache_path)
-            except:
-                pass
+            ensure_thumbnail(
+                os.path.join(PHOTOS_DIR, filename), cache_path, 1200
+            )
             time.sleep(0.2)  # keep server responsive between generations
     threading.Thread(target=generate_all, daemon=True).start()
     return "", 204
@@ -1912,8 +1955,8 @@ def preload():
 
 @app.route("/preload-ahead", methods=["POST"])
 def preload_ahead():
-    import threading
-    from PIL import Image as PILImage
+    if not GALLERY_PRELOAD:
+        return "", 204
     data = request.get_json()
     filenames = [f for f in data.get("files", []) if not f.lower().endswith(".gif")]
     def generate():
@@ -1921,19 +1964,9 @@ def preload_ahead():
             cache_path = get_thumb_path(filename, 1200)
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 continue
-            try:
-                path = os.path.join(PHOTOS_DIR, filename)
-                if not os.path.exists(path):
-                    continue
-                img = PILImage.open(path)
-                img.thumbnail((1200, 1200))
-                tmp = tempfile.NamedTemporaryFile(dir=THUMB_DIR, delete=False, suffix='.tmp')
-                img.save(tmp, "JPEG", quality=75)
-                tmp.close()
-                os.chmod(tmp.name, 0o644)
-                os.replace(tmp.name, cache_path)
-            except:
-                pass
+            path = os.path.join(PHOTOS_DIR, filename)
+            if os.path.exists(path):
+                ensure_thumbnail(path, cache_path, 1200)
     threading.Thread(target=generate, daemon=True).start()
     return "", 204
 
@@ -2054,4 +2087,7 @@ def download_progress():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80, debug=False, threaded=True)
+    app.run(
+        host="0.0.0.0", port=GALLERY_PORT, debug=False,
+        threaded=GALLERY_THREADED,
+    )

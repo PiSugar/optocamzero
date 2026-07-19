@@ -33,6 +33,66 @@ I designed Optocam Zero to have a very compact, carry everywhere and have fun so
   
 <br>
 
+## Whisplay HAT + PiSugar 3 Version
+
+This repository also contains a Raspberry Pi OS port for a different hardware
+combination. This version does **not** use the original 240×240 LCD, joystick,
+shutter electronics, removable 14500 battery, or Buildroot image described in
+the standard build guide.
+
+### Hardware requirements
+
+- Raspberry Pi Zero 2 W.
+- Whisplay HAT with its 240×280 LCD, RGB LED, and single button.
+- PiSugar 3 power board with its programmable button.
+- Raspberry Pi Camera Module 3 (`imx708`) with autofocus.
+- A compatible microSD card and the correct camera ribbon cable for Pi Zero.
+
+The normal Whisplay desktop image can run the camera through
+`whisplay-daemon`. A dedicated installation without the daemon is also
+supported; in that mode Optocam owns the Whisplay display and button directly.
+See the [Whisplay installation guide](software/whisplay/README.md) for both
+installation modes.
+
+### Interaction changes
+
+The Whisplay HAT has only one camera button, while in daemon mode the PiSugar
+button's single click remains the desktop Home action. The original joystick
+controls are therefore remapped as follows:
+
+| Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
+| --- | --- | --- | --- | --- | --- | --- |
+| Camera preview | Take a photo or start GIF capture | Select next white balance | Switch Photo/GIF mode | Select next filter | Open on-device gallery | Home (daemon) / toggle preview (standalone) |
+| GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
+| Gallery | Return to camera preview | Show previous item | — | Show next item | Delete / confirm deletion | Home (daemon) |
+
+PiSugar long-press events are reported only after the button is released, so
+the corresponding gallery action occurs on release. Optocam listens for
+PiSugar double-click and long-press events through the persistent TCP service
+on `127.0.0.1:8423`; it does not inject commands into `button_shell` or change
+the user's PiSugar button configuration.
+
+Whisplay single-click is resolved after a short 350 ms double-click window so
+that a double-click never takes an unintended photo. The daemon's Whisplay
+quadruple-click exit gesture is disabled for Optocam; in daemon mode PiSugar
+single-click is the only Home action.
+
+Other differences from the original interface:
+
+- The camera preview fills the complete 240×280 screen and is rotated 90°
+  clockwise by default.
+- Battery level is shown in smaller shadowed white text, for example `BAT 45`,
+  above the ISO value in the lower-left preview HUD.
+- The Whisplay RGB LED acknowledges shutter, save, filter, mode, gallery,
+  recording, deletion, and error events.
+- Filter, white-balance and gallery lists use next/previous gestures that wrap
+  around, so every item remains reachable without a joystick.
+- The original hotspot-mode and splash-screen gestures are not mapped. Captures
+  are instead always available from the web gallery on port 80, for example
+  `http://<raspberry-pi-address>/`.
+
+<br>
+
 ## Sample Photos
 
 

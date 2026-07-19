@@ -90,8 +90,10 @@ class VirtualGPIO:
         self._gallery_active = bool(gallery_active)
 
     def handle_pisugar_event(self, event_name):
-        """Translate the two available PiSugar gestures into legacy controls."""
-        if event_name == "double":
+        """Translate available PiSugar gestures into legacy controls."""
+        if event_name == "single":
+            role = "preview"
+        elif event_name == "double":
             role = "right" if self._gallery_active else "down"
         elif event_name == "long":
             role = "up" if self._gallery_active else "press"
@@ -143,13 +145,14 @@ class WhisplayPWMProxy:
 class WhisplayBackend:
     WIDTH = 240
     HEIGHT = 280
-    CONTENT_HEIGHT = 240
-    CONTENT_Y = (HEIGHT - CONTENT_HEIGHT) // 2
+    LEGACY_CONTENT_HEIGHT = 240
+    LEGACY_CONTENT_Y = (HEIGHT - LEGACY_CONTENT_HEIGHT) // 2
     FRAME_SIZE = WIDTH * HEIGHT * 2
     FEEDBACK_STYLES = {
         "ready": ((0, 120, 35), 0.35),
         "shutter": ((150, 150, 150), 0.16),
         "filter": ((0, 75, 180), 0.20),
+        "awb": ((150, 95, 0), 0.24),
         "navigate": ((0, 100, 160), 0.14),
         "gallery": ((0, 130, 110), 0.22),
         "mode": ((110, 30, 160), 0.24),
@@ -218,9 +221,9 @@ class WhisplayBackend:
                     "OPTOCAM_HOME": self.home,
                     "OPTOCAM_WHISPLAY_BACKEND": "daemon",
                 },
-                # PiSugar single click is the primary Home gesture.  Keep the
-                # daemon's fallback gesture away from normal/long shutter use.
-                "exit_gesture": "quad_click",
+                # PiSugar single click is the only Home gesture. Whisplay click,
+                # double-click and hold all belong to the camera UI.
+                "exit_gesture": "none",
                 "priority": 50,
                 "use_daemon_default_log": True,
                 "persist": True,
@@ -265,11 +268,17 @@ class WhisplayBackend:
 
     def draw_rgb565(self, content):
         content = bytes(content)
-        expected = self.WIDTH * self.CONTENT_HEIGHT * 2
-        if len(content) != expected:
-            raise ValueError(f"expected {expected} RGB565 bytes, got {len(content)}")
-        padding = bytes(self.WIDTH * self.CONTENT_Y * 2)
-        frame = padding + content + padding
+        legacy_size = self.WIDTH * self.LEGACY_CONTENT_HEIGHT * 2
+        if len(content) == self.FRAME_SIZE:
+            frame = content
+        elif len(content) == legacy_size:
+            padding = bytes(self.WIDTH * self.LEGACY_CONTENT_Y * 2)
+            frame = padding + content + padding
+        else:
+            raise ValueError(
+                f"expected {self.FRAME_SIZE} or {legacy_size} RGB565 bytes, "
+                f"got {len(content)}"
+            )
         with self.framebuffer_lock:
             if self.framebuffer is not None:
                 self.framebuffer[:] = frame
@@ -394,10 +403,14 @@ class WhisplayBackend:
                                 event_name = raw_line.decode(
                                     "utf-8", "replace"
                                 ).strip().lower()
-                                if event_name in {"double", "long"}:
+                                usable = event_name in {"double", "long"}
+                                if event_name == "single" and self.mode == "standalone":
+                                    usable = True
+                                if usable:
                                     print(f"PiSugar {event_name} gesture")
                                     self.gpio.handle_pisugar_event(event_name)
-                                # `single` remains the daemon-owned Home event.
+                                # In daemon mode `single` remains the Home event;
+                                # standalone mode uses it as preview on/off.
                         except socket.timeout:
                             pass
                         if time.monotonic() >= next_battery_poll:
@@ -472,11 +485,20 @@ class StandaloneWhisplayBackend(WhisplayBackend):
     @staticmethod
     def _full_frame(content):
         content = bytes(content)
-        expected = WhisplayBackend.WIDTH * WhisplayBackend.CONTENT_HEIGHT * 2
-        if len(content) != expected:
-            raise ValueError(f"expected {expected} RGB565 bytes, got {len(content)}")
-        padding = bytes(WhisplayBackend.WIDTH * WhisplayBackend.CONTENT_Y * 2)
-        return padding + content + padding
+        legacy_size = (
+            WhisplayBackend.WIDTH * WhisplayBackend.LEGACY_CONTENT_HEIGHT * 2
+        )
+        if len(content) == WhisplayBackend.FRAME_SIZE:
+            return content
+        if len(content) == legacy_size:
+            padding = bytes(
+                WhisplayBackend.WIDTH * WhisplayBackend.LEGACY_CONTENT_Y * 2
+            )
+            return padding + content + padding
+        raise ValueError(
+            f"expected {WhisplayBackend.FRAME_SIZE} or {legacy_size} "
+            f"RGB565 bytes, got {len(content)}"
+        )
 
     def draw_rgb565(self, content):
         self.board.draw_image(0, 0, self.WIDTH, self.HEIGHT, self._full_frame(content))

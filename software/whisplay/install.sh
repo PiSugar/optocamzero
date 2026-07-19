@@ -52,14 +52,17 @@ fi
 echo "Installing camera dependencies..."
 apt-get update -q
 apt-get install -y --no-install-recommends \
-    python3-picamera2 python3-pil python3-numpy python3-libgpiod python3-spidev
+    python3-picamera2 python3-pil python3-numpy python3-libgpiod python3-spidev \
+    python3-flask
 
 echo "Installing Optocam Zero to $APP_HOME..."
 install -d -m 0755 "$APP_HOME" "$APP_HOME/photos"
 install -m 0755 "$PYTHON_SOURCE/scripts/optocamzero.py" "$APP_HOME/optocamzero.py"
+install -m 0755 "$PYTHON_SOURCE/scripts/gallery_server.py" "$APP_HOME/gallery_server.py"
 install -m 0644 "$PYTHON_SOURCE/scripts/whisplay_adapter.py" "$APP_HOME/whisplay_adapter.py"
 install -m 0644 "$PYTHON_SOURCE/assets/cmunvt.ttf" "$APP_HOME/cmunvt.ttf"
 install -m 0644 "$PYTHON_SOURCE/assets/splash.raw" "$APP_HOME/splash.raw"
+install -m 0644 "$PYTHON_SOURCE/assets/optocamlogo.svg" "$APP_HOME/optocamlogo.svg"
 install -m 0755 "$SCRIPT_DIR/run_optocamzero.sh" "$APP_HOME/run_optocamzero.sh"
 install -m 0755 "$SCRIPT_DIR/register_app.py" "$APP_HOME/register_app.py"
 install -m 0755 "$SCRIPT_DIR/autostart.py" "$APP_HOME/autostart.py"
@@ -74,6 +77,7 @@ chown -R "$INSTALL_USER:$INSTALL_GROUP" "$APP_HOME"
 
 # Stop a previously installed variant before replacing its unit file.
 systemctl disable --now optocamzero.service 2>/dev/null || true
+systemctl disable --now optocam-gallery.service 2>/dev/null || true
 
 SERVICE_TEMPLATE="$SCRIPT_DIR/services/optocamzero-$MODE.service.in"
 sed \
@@ -82,6 +86,14 @@ sed \
     -e "s|@USER_HOME@|$INSTALL_HOME|g" \
     -e "s|@APP_HOME@|$APP_HOME|g" \
     "$SERVICE_TEMPLATE" > /etc/systemd/system/optocamzero.service
+
+sed \
+    -e "s|@USER@|$INSTALL_USER|g" \
+    -e "s|@GROUP@|$INSTALL_GROUP|g" \
+    -e "s|@USER_HOME@|$INSTALL_HOME|g" \
+    -e "s|@APP_HOME@|$APP_HOME|g" \
+    "$SCRIPT_DIR/services/optocam-gallery.service.in" \
+    > /etc/systemd/system/optocam-gallery.service
 
 if [ "$MODE" = daemon ]; then
     if ! systemctl cat whisplay-daemon.service >/dev/null 2>&1; then
@@ -106,6 +118,7 @@ else
 fi
 
 systemctl daemon-reload
+systemctl enable --now optocam-gallery.service
 systemctl enable --now optocamzero.service
 
 echo
@@ -116,3 +129,4 @@ else
     echo "whisplay-daemon is disabled; Optocam owns the HAT directly."
 fi
 echo "Photos are stored in: $APP_HOME/photos"
+echo "Web gallery: http://$(hostname -I | awk '{print $1}')/"

@@ -6,6 +6,7 @@ This port targets the following hardware combination:
 - Whisplay HAT (240×280 LCD and one button)
 - PiSugar 3
 - Raspberry Pi Camera Module 3 (`imx708`, autofocus)
+- Compatible microSD card and the Camera Module ribbon cable for Pi Zero
 
 It supports both Whisplay deployment models:
 
@@ -35,6 +36,11 @@ hold the HAT button, or run:
 sudo systemctl start optocamzero.service
 ```
 
+This version requires a Whisplay daemon that supports
+`exit_gesture=none`. This disables quadruple-click exit for Optocam so Whisplay
+click, double-click, and hold remain available to the camera. PiSugar
+single-click remains Home.
+
 For a dedicated camera without `whisplay-daemon`, run:
 
 ```sh
@@ -49,27 +55,36 @@ the daemon.
 No boot overlays are changed. Photos and GIFs are stored under
 `~/optocamzero-whisplay/photos` in both modes.
 
+The installer also enables a web gallery on port 80. Open
+`http://<raspberry-pi-address>/` (for the test device,
+`http://192.168.100.155/`) to browse, download, or delete captures. The gallery
+runs independently of the camera UI and remains available in both startup
+modes.
+
 ## Controls
 
-| Context | Whisplay click | Whisplay hold | PiSugar double-click | PiSugar hold | PiSugar click (daemon) |
-| --- | --- | --- | --- | --- | --- |
-| Preview | Take photo / record GIF | Toggle Photo/GIF | Next filter | Open gallery | Home |
-| GIF recording | Cancel recording | — | — | — | Home |
-| Gallery | Close gallery | — | Next item | Delete / confirm delete | Home |
+| Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
+| --- | --- | --- | --- | --- | --- | --- |
+| Preview | Take photo / record GIF | Next white balance | Toggle Photo/GIF | Next filter | Open gallery | Home (daemon) / preview on-off (standalone) |
+| GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
+| Gallery | Close gallery | Previous item | — | Next item | Delete / confirm delete | Home (daemon) |
 
 In daemon mode, PiSugar single-click remains owned by `whisplay-daemon` as the
 system Home gesture. In standalone mode there is no desktop, so stop/restart the
 camera with `systemctl`. Optocam only subscribes to the TCP event stream: it
 does not read or change `button_shell`, `button_enable`, or `anti_mistouch`, so
-existing PiSugar custom actions remain untouched.
+existing PiSugar custom actions remain untouched. PiSugar reports a long press
+only after the button is released, so its gallery or deletion action also runs
+on release. Whisplay single-click waits for a 350 ms double-click window before
+firing the shutter, preventing an AWB double-click from taking a photo first.
 
 ## Screen and LED feedback
 
-The complete 240×240 application view is rotated 90 degrees clockwise by
-default. Set `OPTOCAM_DISPLAY_ROTATION` to `0`, `90`, `180`, or `270` to change
-it. The top-centre battery icon follows the Whisplay desktop design: green at
-70% or higher, amber at 35–69%, and red below 35%. It is refreshed from PiSugar
-every five seconds and appears in preview, recording and gallery views.
+The camera preview fills the complete 240×280 panel and is rotated 90 degrees
+clockwise by default. Set `OPTOCAM_DISPLAY_ROTATION` to `0`, `90`, `180`, or
+`270` to change it. Battery level is refreshed from PiSugar every five seconds
+and rendered as smaller shadowed white text such as `BAT 45` above, and
+left-aligned with, the ISO value in the lower-left preview HUD.
 
 The Whisplay RGB LED gives immediate feedback without delaying the shutter:
 
@@ -80,11 +95,10 @@ The Whisplay RGB LED gives immediate feedback without delaying the shutter:
 - red: GIF recording, deletion, or an error
 - amber: waiting for delete confirmation
 
-The original joystick-only controls for white-balance selection and hotspot
-transfer mode are intentionally not mapped: there are not enough unambiguous
-gestures, and delaying the single-click shutter to detect click sequences makes
-the camera feel unresponsive. Captured files remain available over SSH/SFTP or
-directly from the `photos` directory.
+Filter and white-balance selection wrap around, while Whisplay/PiSugar provide
+previous/next gallery navigation, so every functional choice remains reachable.
+The original hotspot-mode and splash-screen gestures are intentionally omitted:
+the web gallery is always available, and the splash trigger is cosmetic.
 
 ## Diagnostics
 

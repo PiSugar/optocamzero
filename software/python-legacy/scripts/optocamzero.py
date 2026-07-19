@@ -41,6 +41,17 @@ DISPLAY_ROTATION = int(os.getenv(
 if DISPLAY_ROTATION not in {0, 90, 180, 270}:
     raise ValueError("OPTOCAM_DISPLAY_ROTATION must be 0, 90, 180, or 270")
 
+# The Whisplay panel is physically 240x280.  Rendering uses the dimensions
+# before the final framebuffer rotation, so 90/270-degree modes build a
+# 280x240 landscape canvas which becomes a full 240x280 panel frame.
+if WHISPLAY_MODE:
+    PREVIEW_SIZE = (
+        (280, 240) if DISPLAY_ROTATION in {90, 270} else (240, 280)
+    )
+else:
+    PREVIEW_SIZE = (240, 240)
+PREVIEW_WIDTH, PREVIEW_HEIGHT = PREVIEW_SIZE
+
 if WHISPLAY_MODE:
     from whisplay_adapter import (
         NullSPI,
@@ -183,8 +194,11 @@ display_lock = threading.Lock()
 # Camera configuration cache
 class CameraConfigCache:
     def __init__(self, picam2):
+        # The existing camera-orientation correction swaps width and height.
+        # Request the inverse size so the corrected image matches PREVIEW_SIZE.
+        camera_preview_size = (PREVIEW_HEIGHT, PREVIEW_WIDTH)
         self.preview_config = picam2.create_preview_configuration(
-            main={"size": (240, 240), "format": "RGB888"},
+            main={"size": camera_preview_size, "format": "RGB888"},
             buffer_count=3,
             queue=False,
             controls={"AfMode": 2, "AfSpeed": 1, "FrameDurationLimits": (100, 25000)}
@@ -225,7 +239,7 @@ _hud_overlay_cache = {"key": None, "img": None}
 
 def make_text_shadow(text, x, y, font):
     from PIL import ImageDraw, ImageFilter
-    shadow = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
     ImageDraw.Draw(shadow).text((x, y), text, font=font, fill=(0, 0, 0, 250))
     return shadow.filter(ImageFilter.GaussianBlur(radius=4))
 
@@ -278,12 +292,12 @@ def get_centre_msg_sprite(text):
         return _centre_msg_sprite_cache[text]
     from PIL import ImageDraw, ImageFilter
     font = load_font(25)
-    shadow = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
-    white  = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
+    white  = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
     wd = ImageDraw.Draw(white)
     b = wd.textbbox((0, 0), text, font=font)
-    mx = (240 - (b[2] - b[0])) // 2 - b[0]
-    my = (240 - (b[3] - b[1])) // 2 - b[1]
+    mx = (PREVIEW_WIDTH - (b[2] - b[0])) // 2 - b[0]
+    my = (PREVIEW_HEIGHT - (b[3] - b[1])) // 2 - b[1]
     ImageDraw.Draw(shadow).text((mx, my), text, font=font, fill=(0, 0, 0, 250))
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=4))
     wd.text((mx, my), text, font=font, fill=(255, 255, 255, 255))
@@ -319,11 +333,14 @@ def render_centre_msg(base_rgb, text, age, dur):
     a, s = _ease_centre_msg(age, dur)
     sprite = get_centre_msg_sprite(text)
     if abs(s - 1.0) > 0.005:                # handles both shrink (<1) and overshoot (>1)
-        sw = max(1, int(240 * s))
-        small = sprite.resize((sw, sw), Image.BILINEAR)
-        sprite2 = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
-        off = (240 - sw) // 2
-        sprite2.paste(small, (off, off))
+        sw = max(1, int(PREVIEW_WIDTH * s))
+        sh = max(1, int(PREVIEW_HEIGHT * s))
+        small = sprite.resize((sw, sh), Image.BILINEAR)
+        sprite2 = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
+        sprite2.paste(
+            small,
+            ((PREVIEW_WIDTH - sw) // 2, (PREVIEW_HEIGHT - sh) // 2),
+        )
         sprite = sprite2
     if a < 0.999:
         faded = sprite.copy()
@@ -346,9 +363,10 @@ def render_pill_pop(base_rgb, indicator, scale):
         return Image.alpha_composite(base_rgb.convert("RGBA"), indicator).convert("RGB")
     cx = (bbox[0] + bbox[2]) / 2.0
     cy = (bbox[1] + bbox[3]) / 2.0
-    sw = max(1, int(240 * scale))
-    resized = indicator.resize((sw, sw), Image.BILINEAR)
-    canvas = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+    sw = max(1, int(PREVIEW_WIDTH * scale))
+    sh = max(1, int(PREVIEW_HEIGHT * scale))
+    resized = indicator.resize((sw, sh), Image.BILINEAR)
+    canvas = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
     canvas.paste(resized, (int(round(cx * (1 - scale))), int(round(cy * (1 - scale)))))
     return Image.alpha_composite(base_rgb.convert("RGBA"), canvas).convert("RGB")
 
@@ -364,8 +382,8 @@ def get_awb_sprite(text, font_size):
         return _awb_sprite_cache[key]
     from PIL import ImageDraw, ImageFilter
     font = load_font(font_size)
-    shadow = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
-    white  = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
+    white  = Image.new("RGBA", PREVIEW_SIZE, (0, 0, 0, 0))
     wd = ImageDraw.Draw(white)
     b = wd.textbbox((0, 0), text, font=font)
     ax, ay = 15, 15 - b[1]
@@ -392,19 +410,20 @@ def get_filter_indicator(filter_name):
     from PIL import ImageDraw, ImageFilter
     # Rendered at SxS supersample then scaled down with LANCZOS so the circle /
     # pill outline is anti-aliased. Cached per filter, so this runs once per
-    # filter — the preview loop only ever composites the finished 240px layer,
+    # filter — the preview loop only ever composites the finished preview layer,
     # so there is no per-frame cost and the fps is unchanged.
     S   = 3
-    big = 240 * S
+    big_w = PREVIEW_WIDTH * S
+    big_h = PREVIEW_HEIGHT * S
     pad = 10 * S
     r   = 17 * S
-    cx  = big - pad - r
+    cx  = big_w - pad - r
     cy  = pad + r
     font = load_font(24 * S)
 
     # Build shadow and white layers separately, then composite — same approach as HUD text
-    shadow = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    white  = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
+    white  = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
     sd = ImageDraw.Draw(shadow)
     wd = ImageDraw.Draw(white)
 
@@ -417,7 +436,7 @@ def get_filter_indicator(filter_name):
         h_pad  = 10 * S
         pill_h = r * 2
         pill_w = (tb[2] - tb[0]) + h_pad * 2
-        x1, y0 = big - pad, pad
+        x1, y0 = big_w - pad, pad
         x0, y1 = x1 - pill_w, y0 + pill_h
         cr  = pill_h // 2
         pcx = (x0 + x1) // 2
@@ -441,7 +460,9 @@ def get_filter_indicator(filter_name):
         wd.text((tx, ty), label, font=font, fill=(255, 255, 255, 255))
 
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=4 * S))
-    layer  = Image.alpha_composite(shadow, white).resize((240, 240), Image.LANCZOS)
+    layer = Image.alpha_composite(shadow, white).resize(
+        PREVIEW_SIZE, Image.LANCZOS
+    )
     _indicator_cache[filter_name] = layer
     return layer
 
@@ -489,7 +510,8 @@ def _build_gif_indicator_phases():
     # come out smooth and anti-aliased instead of jagged. One-time cost.
     from PIL import ImageDraw, ImageFilter
     S   = 3
-    big = 240 * S
+    big_w = PREVIEW_WIDTH * S
+    big_h = PREVIEW_HEIGHT * S
     font = load_font(24 * S)
     label = "GIF"
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
@@ -498,7 +520,7 @@ def _build_gif_indicator_phases():
     pad    = 10 * S
     pill_h = 34 * S
     pill_w = (tb[2] - tb[0]) + 20 * S
-    x1 = big - pad
+    x1 = big_w - pad
     x0 = x1 - pill_w
     y0 = pad + pill_h + 8 * S
     y1 = y0 + pill_h
@@ -511,8 +533,8 @@ def _build_gif_indicator_phases():
     layers = []
     for k in range(_GIF_PILL_PHASES):
         phase = period * k / _GIF_PILL_PHASES   # full pattern shift over one loop
-        shadow = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-        white  = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        shadow = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
+        white  = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
         sd = ImageDraw.Draw(shadow)
         wd = ImageDraw.Draw(white)
         _draw_dashed_path(sd, pts, phase, dash, gap, 3 * S, (0, 0, 0, 250))
@@ -520,7 +542,9 @@ def _build_gif_indicator_phases():
         sd.text((tx, ty), label, font=font, fill=(0, 0, 0, 250))
         wd.text((tx, ty), label, font=font, fill=(255, 255, 255, 255))
         shadow = shadow.filter(ImageFilter.GaussianBlur(radius=4 * S))
-        layer = Image.alpha_composite(shadow, white).resize((240, 240), Image.LANCZOS)
+        layer = Image.alpha_composite(shadow, white).resize(
+            PREVIEW_SIZE, Image.LANCZOS
+        )
         layers.append(layer)
     return layers
 
@@ -834,49 +858,14 @@ def _rotate_rgb565_bytes(data):
     pixels = np.frombuffer(data, dtype='>u2').reshape((240, 240))
     return _rotate_display_array(pixels).astype('>u2').tobytes()
 
-_battery_sprite_cache = {}
-def _battery_fill_color(level):
-    if level >= 70:
-        return (85, 255, 0, 255)
-    if level >= 35:
-        return (255, 196, 79, 255)
-    return (255, 107, 107, 255)
-
-def _get_battery_sprite(level):
-    """Whisplay-daemon-style 26x15 battery with the percentage inside."""
-    level = max(0, min(100, int(level)))
-    if level in _battery_sprite_cache:
-        return _battery_sprite_cache[level]
-    from PIL import ImageDraw
-    sprite = Image.new("RGBA", (30, 19), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(sprite)
-    fill = _battery_fill_color(level)
-    draw.rounded_rectangle(
-        (0, 2, 26, 17), radius=3, fill=fill,
-        outline=(255, 255, 255, 255), width=2,
-    )
-    draw.rectangle((26, 7, 29, 12), fill=(255, 255, 255, 255))
-    label = str(level)
-    font = load_font(13)
-    bbox = draw.textbbox((0, 0), label, font=font)
-    text_x = (26 - (bbox[2] - bbox[0])) // 2 - bbox[0]
-    text_y = 2 + (15 - (bbox[3] - bbox[1])) // 2 - bbox[1]
-    luminance = 0.299 * fill[0] + 0.587 * fill[1] + 0.114 * fill[2]
-    text_color = (0, 0, 0, 255) if luminance > 128 else (255, 255, 255, 255)
-    draw.text((text_x, text_y), label, font=font, fill=text_color)
-    _battery_sprite_cache[level] = sprite
-    return sprite
-
-def _overlay_battery(image):
+def _battery_label():
+    """Return plain percentage text for the preview HUD."""
     if not WHISPLAY_MODE or _whisplay is None:
-        return image
+        return None
     level = _whisplay.get_battery_level()
     if level is None:
-        return image
-    sprite = _get_battery_sprite(level)
-    # Centred between AWB (left) and filter indicator (right).
-    image.paste(sprite, ((240 - sprite.width) // 2, 8), sprite)
-    return image
+        return None
+    return f"BAT {max(0, min(100, int(level)))}"
 
 def hardware_feedback(kind):
     if WHISPLAY_MODE and _whisplay is not None:
@@ -885,7 +874,7 @@ def hardware_feedback(kind):
 def display_image(image):
     if WHISPLAY_MODE:
         with display_lock:
-            _whisplay.draw_rgb565(convert_to_rgb565(_overlay_battery(image)))
+            _whisplay.draw_rgb565(convert_to_rgb565(image))
         return
     with display_lock:
         send_command(0x2A)
@@ -1608,11 +1597,16 @@ def button_handler():
     last_joy_down = 0
     debounce = 0.3
 
-    # Capture button long-press → toggle GIF mode (suppresses the photo)
+    # Whisplay capture gestures: click = shutter, double-click = next AWB,
+    # hold = Photo/GIF. A short single-click is delayed just long enough to
+    # distinguish it from a double-click, then handled normally.
     cap_was_down = False
     cap_down_time = 0
     cap_long_fired = False
+    cap_click_pending_at = 0
+    cap_double_candidate = False
     CAP_LONG_THRESHOLD = 0.6
+    CAP_DOUBLE_WINDOW = 0.35
 
     left_held_since = 0
     right_held_since = 0
@@ -1813,8 +1807,9 @@ def button_handler():
                 time.sleep(0.05)
                 continue
 
-            # --- Capture button: tap = photo / GIF record, long-press = toggle GIF mode ---
+            # --- Capture: click = shutter, double = AWB, hold = Photo/GIF ---
             cap_is_down = not GPIO.input(BUTTON_CAPTURE)
+            cap_single_action = False
 
             # During a GIF recording, a shutter press cancels it (discards data)
             if gif_recording:
@@ -1832,60 +1827,95 @@ def button_handler():
                 cap_was_down = True
                 cap_down_time = now
                 cap_long_fired = False
+                cap_double_candidate = bool(
+                    WHISPLAY_MODE and cap_click_pending_at > 0
+                    and now - cap_click_pending_at <= CAP_DOUBLE_WINDOW
+                )
+                if cap_double_candidate:
+                    cap_click_pending_at = 0
 
             elif cap_is_down and cap_was_down:
-                # Held — fire GIF-mode toggle once at the threshold (live preview only)
-                if (not cap_long_fired and now - cap_down_time >= CAP_LONG_THRESHOLD
+                if (not cap_long_fired
+                        and now - cap_down_time >= CAP_LONG_THRESHOLD
                         and preview_active and not capturing and not gif_recording
                         and not gallery_active):
                     cap_long_fired = True
+                    cap_click_pending_at = 0
+                    cap_double_candidate = False
                     gif_mode = not gif_mode
                     gif_mode_label_time = now
                     print(f"GIF mode {'ON' if gif_mode else 'OFF'}")
                     hardware_feedback("mode")
 
             elif not cap_is_down and cap_was_down:
-                # Released — a long-press already acted on hold, so swallow it
                 cap_was_down = False
                 if cap_long_fired:
                     last_capture = now
-                elif now - last_capture > debounce:
+                elif WHISPLAY_MODE and cap_double_candidate:
+                    cap_double_candidate = False
                     last_capture = now
-                    if gallery_active:
+                    if gallery_active and gallery_images:
                         if gallery_confirm_delete:
                             gallery_confirm_delete = False
-                            gallery_needs_update = True
                         else:
-                            gallery_active = False
-                            preview_active = True
-                            print("Gallery closed")
-                            hardware_feedback("gallery")
+                            gallery_index = (gallery_index - 1) % len(gallery_images)
+                            hardware_feedback("navigate")
+                        gallery_needs_update = True
                     elif preview_active and not capturing and not gif_recording:
-                        try:
-                            check_path = GALLERY_DIR if os.path.exists(GALLERY_DIR) else os.path.dirname(GALLERY_DIR)
-                            stat = os.statvfs(check_path)
-                            free_bytes = stat.f_bavail * stat.f_bsize
-                            if free_bytes < 20 * 1024 * 1024:
-                                no_space_message_time = time.time()
-                                print("✗ No space in card")
-                                hardware_feedback("error")
-                            elif gif_mode:
-                                gif_record_requested = True
-                                print("🎞 GIF RECORD")
-                                hardware_feedback("record")
-                            else:
-                                capture_requested = True
-                                print("📸 CAPTURE")
-                                hardware_feedback("shutter")
-                        except:
-                            if gif_mode:
-                                gif_record_requested = True
-                                print("🎞 GIF RECORD")
-                                hardware_feedback("record")
-                            else:
-                                capture_requested = True
-                                print("📸 CAPTURE")
-                                hardware_feedback("shutter")
+                        awb_mode_index = (awb_mode_index + 1) % len(AWB_MODES)
+                        awb_mode_changed = True
+                        awb_changed_time = now
+                        print(f"AWB: {AWB_MODES[awb_mode_index][1]}")
+                        hardware_feedback("awb")
+                elif WHISPLAY_MODE:
+                    cap_click_pending_at = now
+                else:
+                    cap_single_action = True
+
+            # Resolve a Whisplay single-click only after the double-click
+            # window closes. Do not fire while a possible second click is down.
+            if (WHISPLAY_MODE and cap_click_pending_at > 0 and not cap_is_down
+                    and now - cap_click_pending_at > CAP_DOUBLE_WINDOW):
+                cap_click_pending_at = 0
+                cap_single_action = True
+
+            if cap_single_action and now - last_capture > debounce:
+                last_capture = now
+                if gallery_active:
+                    if gallery_confirm_delete:
+                        gallery_confirm_delete = False
+                        gallery_needs_update = True
+                    else:
+                        gallery_active = False
+                        preview_active = True
+                        print("Gallery closed")
+                        hardware_feedback("gallery")
+                elif preview_active and not capturing and not gif_recording:
+                    try:
+                        check_path = GALLERY_DIR if os.path.exists(GALLERY_DIR) else os.path.dirname(GALLERY_DIR)
+                        stat = os.statvfs(check_path)
+                        free_bytes = stat.f_bavail * stat.f_bsize
+                        if free_bytes < 20 * 1024 * 1024:
+                            no_space_message_time = time.time()
+                            print("✗ No space in card")
+                            hardware_feedback("error")
+                        elif gif_mode:
+                            gif_record_requested = True
+                            print("🎞 GIF RECORD")
+                            hardware_feedback("record")
+                        else:
+                            capture_requested = True
+                            print("📸 CAPTURE")
+                            hardware_feedback("shutter")
+                    except:
+                        if gif_mode:
+                            gif_record_requested = True
+                            print("🎞 GIF RECORD")
+                            hardware_feedback("record")
+                        else:
+                            capture_requested = True
+                            print("📸 CAPTURE")
+                            hardware_feedback("shutter")
 
             # --- Preview toggle button ---
             if not GPIO.input(BUTTON_PREVIEW):
@@ -2071,6 +2101,7 @@ def main():
     print("✓ Green dot = capture confirmation")
     if WHISPLAY_MODE:
         print("✓ Whisplay click: Capture / Close gallery")
+        print("✓ Whisplay double click: Next AWB / Previous gallery item")
         print("✓ Whisplay hold: Toggle Photo/GIF mode")
         print("✓ PiSugar double click: Next filter / Next gallery item")
         print("✓ PiSugar hold: Open gallery / Delete")
@@ -2270,8 +2301,8 @@ def main():
                                     # this so the filter never visibly drops out.
                                     cold_start_pending = False
                                     first_preview_frame_pending = False
-                                    if preview_image.size != (240, 240):
-                                        preview_image = preview_image.resize((240, 240), Image.LANCZOS)
+                                    if preview_image.size != PREVIEW_SIZE:
+                                        preview_image = preview_image.resize(PREVIEW_SIZE, Image.LANCZOS)
                                     display_image(preview_image)
                                     log("First preview frame displayed")
                                     hardware_feedback("ready")
@@ -2279,19 +2310,21 @@ def main():
                                     continue
                                 first_preview_frame_pending = False
                                 preview_image = apply_filter(preview_image)
-                                if preview_image.size != (240, 240):
-                                    preview_image = preview_image.resize((240, 240), Image.LANCZOS)
+                                if preview_image.size != PREVIEW_SIZE:
+                                    preview_image = preview_image.resize(PREVIEW_SIZE, Image.LANCZOS)
                                 if capture_dot_time > 0 and (time.time() - capture_dot_time) >= 2.0:
                                     capture_dot_time = 0
 
                                 # --- ISO (bottom left) and Shutter (bottom right) ---
                                 from PIL import ImageDraw
                                 font_hud = load_font(25)
+                                font_battery = load_font(18)
                                 font_awb_full  = load_font(25)
                                 font_awb_abbr  = load_font(24)
                                 tmp_draw = ImageDraw.Draw(preview_image)
 
                                 iso_val = str(nearest_standard_iso(metadata.get("AnalogueGain", 1.0)))
+                                battery_val = _battery_label()
                                 exp = metadata.get("ExposureTime", 10000)
                                 shutter_val = nearest_standard_shutter(exp) if exp > 0 else "?"
                                 awb_switching = time.time() - awb_changed_time < 1.0
@@ -2319,12 +2352,26 @@ def main():
 
                                 # Shutter position: bottom right
                                 b_sh = tmp_draw.textbbox((0, 0), shutter_val, font=font_hud)
-                                sx = 240 - 15 - (b_sh[2] - b_sh[0])
+                                sx = PREVIEW_WIDTH - 15 - (b_sh[2] - b_sh[0])
 
                                 # Shared bottom y — use max height so both sit on the same baseline
-                                hud_bottom_y = 240 - 15 - max(b_iso[3] - b_iso[1], b_sh[3] - b_sh[1])
+                                hud_bottom_y = PREVIEW_HEIGHT - 15 - max(
+                                    b_iso[3] - b_iso[1], b_sh[3] - b_sh[1]
+                                )
                                 iy = hud_bottom_y
                                 sy = hud_bottom_y
+
+                                # Battery percentage: plain white text, left-aligned
+                                # with ISO and one text row above it.  It uses the
+                                # same blurred shadow treatment as the other HUD data.
+                                battery_y = None
+                                if battery_val is not None:
+                                    b_battery = tmp_draw.textbbox(
+                                        (0, 0), battery_val, font=font_battery
+                                    )
+                                    battery_y = (
+                                        iy + b_iso[1] - 6 - b_battery[3]
+                                    )
 
                                 # Transient centre messages (mutually exclusive).
                                 # This also clears expired timers, so it must run every
@@ -2369,7 +2416,7 @@ def main():
                                 # affects it changed; otherwise rebuild and cache it.
                                 # (The centre label and a popping pill are NOT in here —
                                 # they're animated on top below, so they never invalidate it.)
-                                hud_key = (awb_label, iso_val, shutter_val,
+                                hud_key = (awb_label, battery_val, iso_val, shutter_val,
                                            FILTERS[filter_index], gif_phase_mod, pill_popping, awb_popping)
                                 if _hud_overlay_cache["key"] == hud_key:
                                     overlay = _hud_overlay_cache["img"]
@@ -2377,6 +2424,14 @@ def main():
                                     iso_shadow = get_cached_shadow("iso", iso_val, ix, iy, font_hud)
                                     sh_shadow = get_cached_shadow("shutter", shutter_val, sx, sy, font_hud)
                                     overlay = Image.alpha_composite(iso_shadow, sh_shadow)
+                                    if battery_val is not None:
+                                        overlay = Image.alpha_composite(
+                                            overlay,
+                                            get_cached_shadow(
+                                                "battery", battery_val, ix,
+                                                battery_y, font_battery,
+                                            ),
+                                        )
                                     if not awb_popping:
                                         overlay = Image.alpha_composite(
                                             overlay, get_cached_shadow("awb", awb_label, ax, ay, font_awb))
@@ -2395,13 +2450,18 @@ def main():
                                 draw_hud = ImageDraw.Draw(preview_image)
                                 if not awb_popping:
                                     draw_hud.text((ax, ay), awb_label, font=font_awb, fill=(255, 255, 255))
+                                if battery_val is not None:
+                                    draw_hud.text(
+                                        (ix, battery_y), battery_val,
+                                        font=font_battery, fill=(255, 255, 255),
+                                    )
                                 draw_hud.text((ix, iy), iso_val, font=font_hud, fill=(255, 255, 255))
                                 draw_hud.text((sx, sy), shutter_val, font=font_hud, fill=(255, 255, 255))
 
                                 # Saving spinner — bottom centre, vertically aligned with ISO/shutter
                                 if saving_active > 0:
                                     sp_r  = 7
-                                    sp_cx = 120
+                                    sp_cx = PREVIEW_WIDTH // 2
                                     sp_cy = hud_bottom_y + (b_iso[1] + b_iso[3]) // 2
                                     sp_a  = int(time.time() * 360) % 360
                                     sp_box   = [sp_cx-sp_r,   sp_cy-sp_r,   sp_cx+sp_r,   sp_cy+sp_r]
