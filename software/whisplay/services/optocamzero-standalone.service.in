@@ -1,0 +1,26 @@
+[Unit]
+Description=Optocam Zero direct Whisplay hardware mode
+Conflicts=whisplay-daemon.service
+After=local-fs.target pisugar-server.service
+Wants=pisugar-server.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+SupplementaryGroups=audio video gpio input spi i2c
+WorkingDirectory=@APP_HOME@
+Environment=HOME=@USER_HOME@
+Environment=OPTOCAM_HOME=@APP_HOME@
+Environment=OPTOCAM_HARDWARE=whisplay
+Environment=OPTOCAM_WHISPLAY_BACKEND=standalone
+Environment=WHISPLAY_RUNTIME_DIR=@APP_HOME@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@APP_HOME@/run_optocamzero.sh
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,9 @@
 # Optocam Zero Firmware Installation and Interface Controls
 
+> Using a Whisplay HAT, PiSugar 3, Pi Zero 2 W and Camera Module 3? Use the
+> [Whisplay port and installer](whisplay/README.md) instead of the Buildroot
+> image described below.
+
 <br>
 
 ## Requirements
@@ -73,6 +77,5 @@ After opening the address in a browser, the transfer interface will appear. All 
 - For single image view, click on the image. Use the back button on screen to return, or swipe down on touch devices.
 - In single image view, use the left-right arrow keys or swipe left-right to browse between photos.
 - To view the full resolution image, click the HQ button in single image view.
-
 
 

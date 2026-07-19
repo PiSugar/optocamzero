@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import time
+import os
+import signal
 _script_start = time.time()
 def log(msg):
     sys.stderr.write(f"[{time.time() - _script_start:.2f}s] {msg}\n")
@@ -26,12 +28,37 @@ if 'av' not in sys.modules:
 log("lazy-av shim installed")
 # ──────────────────────────────────────────────────────────────────────────────
 
-import RPi.GPIO as GPIO
-log("GPIO imported")
-import pigpio
-log("pigpio imported")
-import spidev
-log("spidev imported")
+HARDWARE_PROFILE = os.getenv("OPTOCAM_HARDWARE", "original").strip().lower()
+WHISPLAY_MODE = HARDWARE_PROFILE == "whisplay"
+OPTOCAM_HOME = os.path.abspath(os.getenv(
+    "OPTOCAM_HOME",
+    os.path.dirname(os.path.abspath(__file__)) if WHISPLAY_MODE else "/home/dkumkum",
+))
+DISPLAY_ROTATION = int(os.getenv(
+    "OPTOCAM_DISPLAY_ROTATION",
+    "90" if WHISPLAY_MODE else "0",
+))
+if DISPLAY_ROTATION not in {0, 90, 180, 270}:
+    raise ValueError("OPTOCAM_DISPLAY_ROTATION must be 0, 90, 180, or 270")
+
+if WHISPLAY_MODE:
+    from whisplay_adapter import (
+        NullSPI,
+        VirtualGPIO,
+        WhisplayPWMProxy,
+        create_backend,
+    )
+    GPIO = VirtualGPIO()
+    pigpio = None
+    spidev = None
+    log("Whisplay hardware adapter imported")
+else:
+    import RPi.GPIO as GPIO
+    log("GPIO imported")
+    import pigpio
+    log("pigpio imported")
+    import spidev
+    log("spidev imported")
 import threading
 log("threading imported")
 
@@ -51,7 +78,6 @@ _preload_thread = threading.Thread(target=_preload_heavy, daemon=True)
 _preload_thread.start()
 log("heavy-preload thread started (picamera2 + PIL)")
 
-import os
 log("os imported")
 import numpy as np
 log("numpy imported")
@@ -86,19 +112,20 @@ def connect_pigpiod(timeout=30):
             return pi
         time.sleep(0.1)
 
-_wait_for_path('/dev/gpiomem')      # RPi.GPIO needs this
-_wait_for_path('/dev/spidev0.0')    # SPI display needs this
-log("hardware nodes ready")
-# Force clean GPIO
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BCM)
-for pin in [21, 20, 5, 26, 13, 6, 19]:
-    try:
-        GPIO.remove_event_detect(pin)
-    except:
-        pass
-GPIO.cleanup()
-time.sleep(0.2)
+if not WHISPLAY_MODE:
+    _wait_for_path('/dev/gpiomem')      # RPi.GPIO needs this
+    _wait_for_path('/dev/spidev0.0')    # SPI display needs this
+    log("hardware nodes ready")
+    # Force clean GPIO
+    GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BCM)
+    for pin in [21, 20, 5, 26, 13, 6, 19]:
+        try:
+            GPIO.remove_event_detect(pin)
+        except:
+            pass
+    GPIO.cleanup()
+    time.sleep(0.2)
 # Pins
 RST_PIN = 27
 DC_PIN = 25
@@ -110,16 +137,12 @@ JOYSTICK_RIGHT = 26
 JOYSTICK_PRESS = 13
 JOYSTICK_UP = 6
 JOYSTICK_DOWN = 19
-# Setup GPIO
+# Setup GPIO/display backend.  In Whisplay mode these are virtual input lines;
+# whisplay-daemon remains the sole owner of the physical LCD, button and GPIO.
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(RST_PIN, GPIO.OUT)
 GPIO.setup(DC_PIN, GPIO.OUT)
 GPIO.setup(BL_PIN, GPIO.OUT)
-_pi = connect_pigpiod()
-_pi.set_PWM_frequency(BL_PIN, 1000)
-# Keep the backlight OFF until the splash is actually drawn — otherwise it lights
-# the uninitialised (white) panel for ~2s during boot before the splash appears.
-_pi.set_PWM_dutycycle(BL_PIN, 0)
 GPIO.setup(BUTTON_PREVIEW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(BUTTON_CAPTURE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(JOYSTICK_LEFT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -127,12 +150,33 @@ GPIO.setup(JOYSTICK_RIGHT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(JOYSTICK_PRESS, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(JOYSTICK_UP, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(JOYSTICK_DOWN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-# SPI
-spi = spidev.SpiDev()
-spi.open(0, 0)
-spi.max_speed_hz = 100000000
-spi.mode = 0
-spi.bits_per_word = 8
+
+_whisplay = None
+if WHISPLAY_MODE:
+    GPIO.configure_roles(
+        capture=BUTTON_CAPTURE,
+        preview=BUTTON_PREVIEW,
+        left=JOYSTICK_LEFT,
+        right=JOYSTICK_RIGHT,
+        press=JOYSTICK_PRESS,
+        up=JOYSTICK_UP,
+        down=JOYSTICK_DOWN,
+    )
+    _whisplay = create_backend(GPIO, BUTTON_CAPTURE, OPTOCAM_HOME)
+    _pi = WhisplayPWMProxy(_whisplay)
+    spi = NullSPI()
+else:
+    _pi = connect_pigpiod()
+    spi = spidev.SpiDev()
+    spi.open(0, 0)
+    spi.max_speed_hz = 100000000
+    spi.mode = 0
+    spi.bits_per_word = 8
+
+_pi.set_PWM_frequency(BL_PIN, 1000)
+# Keep the backlight OFF until the splash is actually drawn — otherwise it lights
+# the uninitialised panel before the splash appears.
+_pi.set_PWM_dutycycle(BL_PIN, 0)
 # Locks
 camera_lock = threading.RLock()
 display_lock = threading.Lock()
@@ -169,7 +213,7 @@ class CameraConfigCache:
             )
         return self.gif_config
 config_cache = None
-FONT_PATH = "/home/dkumkum/cmunvt.ttf"
+FONT_PATH = os.path.join(OPTOCAM_HOME, "cmunvt.ttf")
 
 # Shadow cache for preview overlays — only regenerated when value changes
 _shadow_cache = {}
@@ -695,6 +739,9 @@ def send_data(data):
             spi.writebytes(chunk)
 def init_display():
     """Display initialization with improved black levels and contrast"""
+    if WHISPLAY_MODE:
+        _whisplay.clear()
+        return
     print("Initializing display (enhanced blacks)...")
     GPIO.output(RST_PIN, GPIO.HIGH)
     time.sleep(0.05)
@@ -732,6 +779,9 @@ def set_backlight(state):
 def set_backlight_brightness(pct):
     _pi.set_PWM_dutycycle(BL_PIN, int(pct * 2.55))
 def clear_display():
+    if WHISPLAY_MODE:
+        _whisplay.clear()
+        return
     with display_lock:
         send_command(0x2A)
         GPIO.output(DC_PIN, GPIO.HIGH)
@@ -756,12 +806,87 @@ _R565_LUT = ((_c16 & 0xF8) << 8).astype(np.uint16)
 _G565_LUT = ((_c16 & 0xFC) << 3).astype(np.uint16)
 _B565_LUT = ((_c16 & 0xF8) >> 3).astype(np.uint16)
 
+def _rotate_display_array(pixels):
+    """Rotate framebuffer pixels clockwise by the configured angle."""
+    if DISPLAY_ROTATION == 90:
+        return np.rot90(pixels, k=-1)
+    if DISPLAY_ROTATION == 180:
+        return np.rot90(pixels, k=2)
+    if DISPLAY_ROTATION == 270:
+        return np.rot90(pixels, k=1)
+    return pixels
+
 def convert_to_rgb565(image):
     """RGB565 conversion with enhanced contrast, via fused per-channel LUTs."""
     a = np.asarray(image, dtype=np.uint8)
     rgb565 = _R565_LUT[a[:, :, 0]] | _G565_LUT[a[:, :, 1]] | _B565_LUT[a[:, :, 2]]
+    if WHISPLAY_MODE:
+        rgb565 = _rotate_display_array(rgb565)
     return rgb565.astype('>u2').tobytes()
+
+def _rotate_rgb565_bytes(data):
+    """Rotate the pre-converted 240x240 splash in Whisplay mode."""
+    if not WHISPLAY_MODE or DISPLAY_ROTATION == 0:
+        return data
+    expected = 240 * 240 * 2
+    if len(data) != expected:
+        return data
+    pixels = np.frombuffer(data, dtype='>u2').reshape((240, 240))
+    return _rotate_display_array(pixels).astype('>u2').tobytes()
+
+_battery_sprite_cache = {}
+def _battery_fill_color(level):
+    if level >= 70:
+        return (85, 255, 0, 255)
+    if level >= 35:
+        return (255, 196, 79, 255)
+    return (255, 107, 107, 255)
+
+def _get_battery_sprite(level):
+    """Whisplay-daemon-style 26x15 battery with the percentage inside."""
+    level = max(0, min(100, int(level)))
+    if level in _battery_sprite_cache:
+        return _battery_sprite_cache[level]
+    from PIL import ImageDraw
+    sprite = Image.new("RGBA", (30, 19), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sprite)
+    fill = _battery_fill_color(level)
+    draw.rounded_rectangle(
+        (0, 2, 26, 17), radius=3, fill=fill,
+        outline=(255, 255, 255, 255), width=2,
+    )
+    draw.rectangle((26, 7, 29, 12), fill=(255, 255, 255, 255))
+    label = str(level)
+    font = load_font(13)
+    bbox = draw.textbbox((0, 0), label, font=font)
+    text_x = (26 - (bbox[2] - bbox[0])) // 2 - bbox[0]
+    text_y = 2 + (15 - (bbox[3] - bbox[1])) // 2 - bbox[1]
+    luminance = 0.299 * fill[0] + 0.587 * fill[1] + 0.114 * fill[2]
+    text_color = (0, 0, 0, 255) if luminance > 128 else (255, 255, 255, 255)
+    draw.text((text_x, text_y), label, font=font, fill=text_color)
+    _battery_sprite_cache[level] = sprite
+    return sprite
+
+def _overlay_battery(image):
+    if not WHISPLAY_MODE or _whisplay is None:
+        return image
+    level = _whisplay.get_battery_level()
+    if level is None:
+        return image
+    sprite = _get_battery_sprite(level)
+    # Centred between AWB (left) and filter indicator (right).
+    image.paste(sprite, ((240 - sprite.width) // 2, 8), sprite)
+    return image
+
+def hardware_feedback(kind):
+    if WHISPLAY_MODE and _whisplay is not None:
+        _whisplay.feedback(kind)
+
 def display_image(image):
+    if WHISPLAY_MODE:
+        with display_lock:
+            _whisplay.draw_rgb565(convert_to_rgb565(_overlay_battery(image)))
+        return
     with display_lock:
         send_command(0x2A)
         GPIO.output(DC_PIN, GPIO.HIGH)
@@ -785,11 +910,15 @@ def overlay_capture_dot(base_image):
     return Image.fromarray(img_array)
 def show_splash():
     """Display pre-converted RGB565 splash image directly to display"""
-    splash_path = "/home/dkumkum/splash.raw"
+    splash_path = os.path.join(OPTOCAM_HOME, "splash.raw")
     if not os.path.exists(splash_path):
         return
     with open(splash_path, "rb") as f:
         data = f.read()
+    if WHISPLAY_MODE:
+        with display_lock:
+            _whisplay.draw_rgb565(_rotate_rgb565_bytes(data))
+        return
     with display_lock:
         send_command(0x2A)
         GPIO.output(DC_PIN, GPIO.HIGH)
@@ -869,7 +998,7 @@ def show_transfer_mode_screen():
 
     display_image(img)
 
-GALLERY_DIR = "/home/dkumkum/photos"
+GALLERY_DIR = os.path.join(OPTOCAM_HOME, "photos")
 
 _capture_counter = None
 _capture_counter_lock = threading.Lock()
@@ -1079,6 +1208,7 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter")
 
         if not os.path.exists(filepath):
             print("✗ File not created")
+            hardware_feedback("error")
             return
 
         file_size = os.path.getsize(filepath)
@@ -1088,6 +1218,7 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter")
                 os.remove(filepath)
             except:
                 pass
+            hardware_feedback("error")
             return
 
         try:
@@ -1100,11 +1231,14 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter")
                 os.remove(filepath)
             except:
                 pass
+            hardware_feedback("error")
             return
 
         print(f"✓ Saved {filename} ({file_size/1024/1024:.2f} MB) in {time.time()-start:.2f}s")
+        hardware_feedback("saved")
     except Exception as e:
         print(f"✗ Save error: {e}")
+        hardware_feedback("error")
     finally:
         with _save_active_lock:
             saving_active -= 1
@@ -1118,6 +1252,7 @@ def capture_full_res(picam2):
     captured_image = None
     filepath = None
     filename = None
+    preview_lens_position = None
 
     try:
         with camera_lock:
@@ -1132,6 +1267,10 @@ def capture_full_res(picam2):
 
             # Stop preview
             if camera_started:
+                try:
+                    preview_lens_position = picam2.capture_metadata().get("LensPosition")
+                except Exception:
+                    preview_lens_position = None
                 picam2.stop()
                 camera_started = False
                 time.sleep(0.02)
@@ -1146,10 +1285,12 @@ def capture_full_res(picam2):
             picam2.set_controls({"AfMode": 1, "AfTrigger": 0})
             focus_start = time.time()
             focused = False
-            # Capped at 0.5s: continuous AF in preview already keeps the lens
-            # focused, so a normal lock is ~0.17s; this stops an occasional
-            # hunt from freezing the preview for a full second.
-            while time.time() - focus_start < 0.5:
+            # Continuous AF in preview normally keeps the lens close. Camera
+            # Module 3 on the Whisplay/Trixie stack can take longer to report
+            # its first full-resolution lock after stream reconfiguration, so
+            # allow it more time instead of capturing during an active scan.
+            focus_timeout = 1.5 if WHISPLAY_MODE else 0.5
+            while time.time() - focus_start < focus_timeout:
                 try:
                     metadata = picam2.capture_metadata()
                     af_state = metadata.get("AfState", 0)
@@ -1163,7 +1304,19 @@ def capture_full_res(picam2):
                     pass
                 time.sleep(0.03)
             if not focused:
-                print("⚠ AF timeout")
+                if preview_lens_position is not None:
+                    # Low-contrast scenes can make the one-shot AF report
+                    # failure. Preserve the lens position that continuous AF
+                    # had established in preview instead of leaving the lens at
+                    # the failed scan position.
+                    picam2.set_controls({
+                        "AfMode": 0,
+                        "LensPosition": float(preview_lens_position),
+                    })
+                    time.sleep(0.08)
+                    print("⚠ AF did not lock; kept preview focus")
+                else:
+                    print("⚠ AF did not lock")
             show_focus = False
 
             # Capture
@@ -1185,6 +1338,7 @@ def capture_full_res(picam2):
 
             if captured_image is None:
                 print("✗ Capture failed")
+                hardware_feedback("error")
                 return None
 
             # Rotate in memory (fast)
@@ -1207,6 +1361,7 @@ def capture_full_res(picam2):
 
     except Exception as e:
         print(f"✗ ERROR: {e}")
+        hardware_feedback("error")
         import traceback
         traceback.print_exc()
         capturing = False
@@ -1244,12 +1399,15 @@ def _save_gif_async(frames, filepath, filename):
                 os.remove(filepath)
             except:
                 pass
+            hardware_feedback("error")
             return
 
         file_size = os.path.getsize(filepath)
         print(f"✓ Saved {filename} ({file_size/1024:.0f} KB) in {time.time()-start:.2f}s")
+        hardware_feedback("saved")
     except Exception as e:
         print(f"✗ GIF save error: {e}")
+        hardware_feedback("error")
         try:
             if filepath and os.path.exists(filepath):
                 os.remove(filepath)
@@ -1472,6 +1630,11 @@ def button_handler():
 
     while not exit_requested:
         try:
+            if WHISPLAY_MODE:
+                GPIO.set_context(gallery_active)
+                if _whisplay.exit_requested:
+                    exit_requested = True
+                    break
             now = time.time()
 
             # --- Splash screen: any button closes it ---
@@ -1523,6 +1686,7 @@ def button_handler():
                             try:
                                 os.remove(filepath)
                                 print(f"✓ Deleted: {os.path.basename(filepath)}")
+                                hardware_feedback("delete")
                                 # Remove any cached thumbnails
                                 fname = os.path.basename(filepath)
                                 thumb_dir = os.path.join(GALLERY_DIR, ".thumbs")
@@ -1532,6 +1696,7 @@ def button_handler():
                                         except: pass
                             except Exception as e:
                                 print(f"✗ Delete error: {e}")
+                                hardware_feedback("error")
                             gallery_images.pop(gallery_index)
                             gallery_confirm_delete = False
                             if not gallery_images:
@@ -1545,11 +1710,13 @@ def button_handler():
                             # Show confirm dialog
                             gallery_confirm_delete = True
                             gallery_needs_update = True
+                            hardware_feedback("delete_pending")
                     elif preview_active and not capturing:
                         filter_index = (filter_index - 1) % len(FILTERS)
                         filter_label_time = now
                         isp_changed = True
                         print(f"Filter: {FILTERS[filter_index]}")
+                        hardware_feedback("filter")
 
             # --- Joystick Down: dismiss delete dialog / cycle filter forward ---
             if not GPIO.input(JOYSTICK_DOWN):
@@ -1563,6 +1730,7 @@ def button_handler():
                         filter_label_time = now
                         isp_changed = True
                         print(f"Filter: {FILTERS[filter_index]}")
+                        hardware_feedback("filter")
 
             # --- Joystick Press: long press = transfer mode, triple = splash, short = gallery ---
             joy_is_down = not GPIO.input(JOYSTICK_PRESS)
@@ -1585,6 +1753,7 @@ def button_handler():
                         splash_active = False
                         preview_active = False
                         print("Transfer mode ON")
+                        hardware_feedback("mode")
                         _transfer_last_activity = time.time()
                         _transfer_dimmed = False
                         subprocess.Popen(["sudo", "systemctl", "start", "optocam-hotspot.service"])
@@ -1592,6 +1761,7 @@ def button_handler():
                     else:
                         preview_active = True
                         print("Transfer mode OFF")
+                        hardware_feedback("mode")
                         if _transfer_dimmed:
                             set_backlight(True)
                         _transfer_dimmed = False
@@ -1623,6 +1793,7 @@ def button_handler():
                             gallery_active = False
                             preview_active = True
                             print("Gallery closed")
+                            hardware_feedback("gallery")
                     else:
                         gallery_images = get_gallery_images()
                         if gallery_images:
@@ -1631,9 +1802,11 @@ def button_handler():
                             preview_active = False
                             gallery_needs_update = True
                             print(f"Gallery opened ({len(gallery_images)} images)")
+                            hardware_feedback("gallery")
                         else:
                             gallery_empty_message_time = time.time()
                             print("Gallery empty")
+                            hardware_feedback("error")
 
             # --- Skip everything else in transfer mode ---
             if transfer_mode:
@@ -1652,6 +1825,7 @@ def button_handler():
                     cap_long_fired = True
                     cap_down_time = now
                     print("🚫 GIF cancel")
+                    hardware_feedback("error")
                 cap_was_down = cap_is_down
 
             elif cap_is_down and not cap_was_down:
@@ -1668,6 +1842,7 @@ def button_handler():
                     gif_mode = not gif_mode
                     gif_mode_label_time = now
                     print(f"GIF mode {'ON' if gif_mode else 'OFF'}")
+                    hardware_feedback("mode")
 
             elif not cap_is_down and cap_was_down:
                 # Released — a long-press already acted on hold, so swallow it
@@ -1684,6 +1859,7 @@ def button_handler():
                             gallery_active = False
                             preview_active = True
                             print("Gallery closed")
+                            hardware_feedback("gallery")
                     elif preview_active and not capturing and not gif_recording:
                         try:
                             check_path = GALLERY_DIR if os.path.exists(GALLERY_DIR) else os.path.dirname(GALLERY_DIR)
@@ -1692,19 +1868,24 @@ def button_handler():
                             if free_bytes < 20 * 1024 * 1024:
                                 no_space_message_time = time.time()
                                 print("✗ No space in card")
+                                hardware_feedback("error")
                             elif gif_mode:
                                 gif_record_requested = True
                                 print("🎞 GIF RECORD")
+                                hardware_feedback("record")
                             else:
                                 capture_requested = True
                                 print("📸 CAPTURE")
+                                hardware_feedback("shutter")
                         except:
                             if gif_mode:
                                 gif_record_requested = True
                                 print("🎞 GIF RECORD")
+                                hardware_feedback("record")
                             else:
                                 capture_requested = True
                                 print("📸 CAPTURE")
+                                hardware_feedback("shutter")
 
             # --- Preview toggle button ---
             if not GPIO.input(BUTTON_PREVIEW):
@@ -1733,6 +1914,7 @@ def button_handler():
                         gallery_index = (gallery_index - 1) % len(gallery_images)
                         gallery_needs_update = True
                         last_scroll_time = now
+                        hardware_feedback("navigate")
                     elif now - left_held_since > HOLD_THRESHOLD:
                         if now - last_scroll_time > FAST_INTERVAL:
                             gallery_index = (gallery_index - 1) % len(gallery_images)
@@ -1751,6 +1933,7 @@ def button_handler():
                         gallery_index = (gallery_index + 1) % len(gallery_images)
                         gallery_needs_update = True
                         last_scroll_time = now
+                        hardware_feedback("navigate")
                     elif now - right_held_since > HOLD_THRESHOLD:
                         if now - last_scroll_time > FAST_INTERVAL:
                             gallery_index = (gallery_index + 1) % len(gallery_images)
@@ -1826,6 +2009,13 @@ _transfer_dimmed = False
 _idle_last_activity = 0.0
 _idle_dimmed = False
 IDLE_DIM_TIMEOUT = 90.0
+
+def _handle_termination(_signum, _frame):
+    global exit_requested
+    exit_requested = True
+
+signal.signal(signal.SIGTERM, _handle_termination)
+
 def main():
     log("main() called")
     global preview_active, capture_requested, exit_requested, camera_started
@@ -1879,10 +2069,20 @@ def main():
     print("✓ Robust verification (no 0 KB files)")
     print("✓ Auto-delete corrupted files")
     print("✓ Green dot = capture confirmation")
-    print(f"✓ KEY1 (GPIO {BUTTON_CAPTURE}): Capture / Close gallery")
-    print(f"✓ KEY2 (GPIO {BUTTON_PREVIEW}): Toggle preview")
-    print(f"✓ Joystick press: Open/close gallery")
-    print(f"✓ Joystick left/right: Navigate gallery")
+    if WHISPLAY_MODE:
+        print("✓ Whisplay click: Capture / Close gallery")
+        print("✓ Whisplay hold: Toggle Photo/GIF mode")
+        print("✓ PiSugar double click: Next filter / Next gallery item")
+        print("✓ PiSugar hold: Open gallery / Delete")
+        if _whisplay.mode == "daemon":
+            print("✓ PiSugar single click: Return to Whisplay desktop")
+        else:
+            print("✓ Standalone boot service: Direct hardware ownership")
+    else:
+        print(f"✓ KEY1 (GPIO {BUTTON_CAPTURE}): Capture / Close gallery")
+        print(f"✓ KEY2 (GPIO {BUTTON_PREVIEW}): Toggle preview")
+        print(f"✓ Joystick press: Open/close gallery")
+        print(f"✓ Joystick left/right: Navigate gallery")
     print("=" * 50 + "\n")
 
     button_thread = threading.Thread(target=button_handler, daemon=True)
@@ -1908,6 +2108,10 @@ def main():
 
     try:
         while not exit_requested:
+
+            if WHISPLAY_MODE and _whisplay.exit_requested:
+                exit_requested = True
+                break
 
             # === IDLE DIM CHECK (camera mode only) ===
             if not transfer_mode and not splash_active:
@@ -2070,6 +2274,7 @@ def main():
                                         preview_image = preview_image.resize((240, 240), Image.LANCZOS)
                                     display_image(preview_image)
                                     log("First preview frame displayed")
+                                    hardware_feedback("ready")
                                     frame_count += 1
                                     continue
                                 first_preview_frame_pending = False
@@ -2257,7 +2462,10 @@ def main():
         with camera_lock:
             if camera_started:
                 picam2.stop()
-        set_backlight(False)
+        if WHISPLAY_MODE:
+            _whisplay.cleanup()
+        else:
+            set_backlight(False)
         GPIO.cleanup()
         spi.close()
         gc.enable()
