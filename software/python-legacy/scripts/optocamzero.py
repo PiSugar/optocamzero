@@ -2531,4 +2531,11 @@ def main():
         gc.enable()
         print("✓ Shutdown complete!")
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        log(f"Unhandled error: {exc!r}")
+        raise
+    finally:
+        if WHISPLAY_MODE and _whisplay is not None:
+            _whisplay.cleanup()

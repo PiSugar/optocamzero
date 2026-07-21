@@ -186,6 +186,7 @@ class WhisplayBackend:
         self._battery_lock = threading.Lock()
         self._feedback_generation = 0
         self._feedback_lock = threading.Lock()
+        self._exit_watchdog_started = False
 
     def _start_shared(self):
         self._update_battery()
@@ -344,7 +345,7 @@ class WhisplayBackend:
                         elif name == "button_released":
                             self.gpio.set_pressed(self.capture_pin, False)
                         elif name in {"app_exit_requested", "app_focus_revoked"}:
-                            self.exit_requested = True
+                            self.request_exit(name)
                             self.gpio.set_pressed(self.capture_pin, False)
                             if name == "app_focus_revoked":
                                 # PiSugar Home revokes immediately, before the
@@ -356,6 +357,24 @@ class WhisplayBackend:
             except Exception:
                 if self.running:
                     time.sleep(0.25)
+
+    def request_exit(self, reason="exit_requested", grace=4.0):
+        self.exit_requested = True
+        if self._exit_watchdog_started:
+            return
+        self._exit_watchdog_started = True
+
+        def watchdog():
+            time.sleep(grace)
+            if self.running:
+                print(
+                    f"Whisplay backend: forcing exit after {reason}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                os._exit(0)
+
+        threading.Thread(target=watchdog, daemon=True).start()
 
     def _pisugar_socket(self):
         return next((path for path in PISUGAR_SOCKETS if os.path.exists(path)), None)
