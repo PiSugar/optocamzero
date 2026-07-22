@@ -3,6 +3,7 @@ import sys
 import time
 import os
 import signal
+import json
 _script_start = time.time()
 def log(msg):
     sys.stderr.write(f"[{time.time() - _script_start:.2f}s] {msg}\n")
@@ -575,6 +576,51 @@ def load_font(size):
 
 # ── Filters ────────────────────────────────────────────────────────────────
 FILTERS = ["Film Standard", "Punch", "B&W", "Deep", "Sand", "Eterna", "TRI-X", "Cutout", "No Filter"]
+SETTINGS_PATH = os.path.join(OPTOCAM_HOME, "settings.json")
+
+def _default_settings():
+    return {
+        "filter": "Film Standard",
+        "awb": "Daylight",
+        "gif_mode": False,
+    }
+
+def load_settings():
+    settings = _default_settings()
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            settings.update(loaded)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log(f"WARN: failed to load settings: {exc}")
+    return settings
+
+def save_settings():
+    data = {
+        "filter": FILTERS[filter_index],
+        "awb": AWB_MODES[awb_mode_index][1],
+        "gif_mode": bool(gif_mode),
+    }
+    tmp_path = SETTINGS_PATH + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(",", ":"))
+            f.write("\n")
+        os.replace(tmp_path, SETTINGS_PATH)
+    except Exception as exc:
+        log(f"WARN: failed to save settings: {exc}")
+
+def _settings_index(values, selected, default_index):
+    try:
+        return values.index(selected)
+    except ValueError:
+        return default_index
+
+_SETTINGS = load_settings()
 
 def _make_lut(points):
     x = [p[0] for p in points]
@@ -1709,6 +1755,7 @@ def button_handler():
                         filter_index = (filter_index - 1) % len(FILTERS)
                         filter_label_time = now
                         isp_changed = True
+                        save_settings()
                         print(f"Filter: {FILTERS[filter_index]}")
                         hardware_feedback("filter")
 
@@ -1723,6 +1770,7 @@ def button_handler():
                         filter_index = (filter_index + 1) % len(FILTERS)
                         filter_label_time = now
                         isp_changed = True
+                        save_settings()
                         print(f"Filter: {FILTERS[filter_index]}")
                         hardware_feedback("filter")
 
@@ -1844,6 +1892,7 @@ def button_handler():
                     cap_double_candidate = False
                     gif_mode = not gif_mode
                     gif_mode_label_time = now
+                    save_settings()
                     print(f"GIF mode {'ON' if gif_mode else 'OFF'}")
                     hardware_feedback("mode")
 
@@ -1865,6 +1914,7 @@ def button_handler():
                         awb_mode_index = (awb_mode_index + 1) % len(AWB_MODES)
                         awb_mode_changed = True
                         awb_changed_time = now
+                        save_settings()
                         print(f"AWB: {AWB_MODES[awb_mode_index][1]}")
                         hardware_feedback("awb")
                 elif WHISPLAY_MODE:
@@ -1980,6 +2030,7 @@ def button_handler():
                         awb_mode_index = (awb_mode_index - 1) % len(AWB_MODES)
                         awb_mode_changed = True
                         awb_changed_time = now
+                        save_settings()
                         print(f"AWB: {AWB_MODES[awb_mode_index][1]}")
                 if not GPIO.input(JOYSTICK_RIGHT):
                     if now - last_scroll_time > debounce:
@@ -1987,6 +2038,7 @@ def button_handler():
                         awb_mode_index = (awb_mode_index + 1) % len(AWB_MODES)
                         awb_mode_changed = True
                         awb_changed_time = now
+                        save_settings()
                         print(f"AWB: {AWB_MODES[awb_mode_index][1]}")
 
             time.sleep(0.02)
@@ -2012,21 +2064,30 @@ gallery_confirm_delete = False
 gallery_empty_message_time = 0
 no_space_message_time = 0
 splash_active = False
-awb_mode_index = AWB_MODES.index(next(m for m in AWB_MODES if m[1] == "Daylight"))
+awb_mode_index = _settings_index(
+    [mode[1] for mode in AWB_MODES],
+    _SETTINGS.get("awb"),
+    AWB_MODES.index(next(m for m in AWB_MODES if m[1] == "Daylight")),
+)
 awb_mode_changed = False
 awb_changed_time = 0
 _awb_last_label = None     # tracks AWB label text to pop it when it changes
 _awb_pop_start = 0.0
-filter_index = FILTERS.index("Film Standard")
+filter_index = _settings_index(
+    FILTERS,
+    _SETTINGS.get("filter"),
+    FILTERS.index("Film Standard"),
+)
 saving_active = 0
 _save_active_lock = threading.Lock()
 filter_label_time = 0
 isp_changed = False
-gif_mode = False              # armed for GIF recording (toggled by long-press)
+gif_mode = bool(_SETTINGS.get("gif_mode"))  # armed for GIF recording (toggled by long-press)
 gif_record_requested = False  # button thread → main loop: start a recording
 gif_recording = False         # True while record_gif() owns the camera/display
 gif_cancel_requested = False  # shutter press during recording → abort + discard
 gif_mode_label_time = 0       # transient "GIF" centre label timestamp
+save_settings()
 _gif_anim_frames = []         # decoded frames of the GIF currently in the gallery
 _gif_anim_index = 0
 _gif_anim_last = 0.0
