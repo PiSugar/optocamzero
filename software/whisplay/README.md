@@ -65,9 +65,15 @@ modes.
 
 | Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
 | --- | --- | --- | --- | --- | --- | --- |
-| Preview | Take photo / record GIF | Next white balance | Toggle Photo/GIF | Next filter | Open gallery | Home (daemon) / preview on-off (standalone) |
+| Preview | Take photo / record GIF | Next white balance | Cycle Photo/GIF/Moment¹ | Next filter | Open gallery | Home (daemon) / preview on-off (standalone) |
 | GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
+| Moment recording | Hold to record, release to save | — | — | — | — | Home (daemon) |
 | Gallery | Close gallery | Previous item | — | Next item | Delete / confirm delete | Home (daemon) |
+
+¹ Moment mode appears only when the ALSA capture device identifies itself as
+`whisplay-sound`. After the photo is taken, hold the Whisplay button to record
+up to 10 seconds. Recordings shorter than one second are discarded. The photo
+and WAV file share the same capture number and are managed as a pair.
 
 In daemon mode, PiSugar single-click remains owned by `whisplay-daemon` as the
 system Home gesture. In standalone mode there is no desktop, so stop/restart the
@@ -91,14 +97,19 @@ The Whisplay RGB LED gives immediate feedback without delaying the shutter:
 - green: camera ready or file saved
 - white: shutter accepted
 - blue/cyan: filter change or gallery navigation
-- purple: Photo/GIF mode change
+- purple: capture mode change
 - red: GIF recording, deletion, or an error
 - amber: waiting for delete confirmation
+
+PHOTO and MOMENT captures also play a short shutter sound through the detected
+`whisplay-sound` card. GIF recording remains silent.
 
 Filter and white-balance selection wrap around, while Whisplay/PiSugar provide
 previous/next gallery navigation, so every functional choice remains reachable.
 The original hotspot-mode and splash-screen gestures are intentionally omitted:
 the web gallery is always available, and the splash trigger is cosmetic.
+Moments show a speaker badge and play once when selected. Web downloads
+and deletions keep each JPG/WAV pair together.
 
 ## Diagnostics
 

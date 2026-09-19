@@ -53,7 +53,7 @@ echo "Installing camera dependencies..."
 apt-get update -q
 apt-get install -y --no-install-recommends \
     python3-picamera2 python3-pil python3-numpy python3-libgpiod python3-spidev \
-    python3-flask
+    python3-flask alsa-utils
 
 echo "Installing Optocam Zero to $APP_HOME..."
 install -d -m 0755 "$APP_HOME" "$APP_HOME/photos"

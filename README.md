@@ -62,9 +62,14 @@ controls are therefore remapped as follows:
 
 | Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
 | --- | --- | --- | --- | --- | --- | --- |
-| Camera preview | Take a photo or start GIF capture | Select next white balance | Switch Photo/GIF mode | Select next filter | Open on-device gallery | Home (daemon) / toggle preview (standalone) |
+| Camera preview | Take a photo or start GIF capture | Select next white balance | Cycle Photo/GIF/Moment¹ | Select next filter | Open on-device gallery | Home (daemon) / toggle preview (standalone) |
 | GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
+| Moment recording | Hold to record, release to save | — | — | — | — | Home (daemon) |
 | Gallery | Return to camera preview | Show previous item | — | Show next item | Delete / confirm deletion | Home (daemon) |
+
+¹ Moment mode is available on Whisplay hardware only when the detected ALSA
+card is `whisplay-sound`. Recordings are capped at 10 seconds and discarded
+when shorter than one second.
 
 PiSugar long-press events are reported only after the button is released, so
 the corresponding gallery action occurs on release. Optocam listens for
@@ -85,11 +90,14 @@ Other differences from the original interface:
   above the ISO value in the lower-left preview HUD.
 - The Whisplay RGB LED acknowledges shutter, save, filter, mode, gallery,
   recording, deletion, and error events.
+- PHOTO and MOMENT captures play a short shutter sound through `whisplay-sound`.
 - Filter, white-balance and gallery lists use next/previous gestures that wrap
   around, so every item remains reachable without a joystick.
 - The original hotspot-mode and splash-screen gestures are not mapped. Captures
   are instead always available from the web gallery on port 80, for example
   `http://<raspberry-pi-address>/`.
+- Moments carry a speaker badge in both galleries. Opening one plays its
+  audio once; downloading or deleting it includes the paired JPG and WAV.
 
 <br>
 

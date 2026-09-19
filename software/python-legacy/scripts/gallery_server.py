@@ -67,6 +67,26 @@ def list_media():
     files.sort(key=lambda f: capture_number_of(f), reverse=True)
     return files
 
+def paired_audio_filename(filename):
+    if not filename.lower().endswith(".jpg"):
+        return None
+    candidate = os.path.splitext(os.path.basename(filename))[0] + ".wav"
+    return candidate if os.path.exists(os.path.join(PHOTOS_DIR, candidate)) else None
+
+def expand_with_paired_audio(filenames):
+    """Return safe, existing image/GIF names plus each photo's paired WAV."""
+    expanded = []
+    seen = set()
+    for filename in filenames:
+        base = os.path.basename(filename)
+        if capture_number_of(base) is None:
+            continue
+        for member in (base, paired_audio_filename(base)):
+            if member and member not in seen and os.path.exists(os.path.join(PHOTOS_DIR, member)):
+                seen.add(member)
+                expanded.append(member)
+    return expanded
+
 HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -268,6 +288,35 @@ header {
     border-radius: 999px;        /* fully rounded ends → pill */
     z-index: 2;
     pointer-events: none;
+}
+.audio-badge {
+    position: absolute;
+    bottom: 7px;
+    left: 7px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    pointer-events: none;
+}
+.audio-badge svg { width: 15px; height: 15px; }
+.viewer-audio-badge {
+    position: absolute;
+    right: 22px;
+    bottom: 18px;
+    display: none;
+    background: rgba(0,0,0,0.44);
+}
+.viewer-audio-badge svg {
+    opacity: 0.58;
+    transition: opacity 0.16s ease;
+}
+.viewer-audio-badge.playing svg {
+    opacity: 1;
 }
 /* Spinner over a GIF poster whose animation is still loading in the
    background. Hidden until the poster JPG has actually loaded (gets `.show`
@@ -842,8 +891,9 @@ body:has(#sel-bar.open) #dl-progress {
         <img src="/thumb/{{ f }}" loading="lazy" alt="{{ f }}" draggable="false">
       </button>
       {% if f.lower().endswith('.gif') %}<span class="gif-badge">GIF</span><div class="grid-spin"></div>{% endif %}
+      {% if f in audio_set %}<span class="audio-badge" aria-label="Moment"><svg viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg"><path d="M2 7h3l4-3v10l-4-3H2z" fill="#fff"/><path d="M11.5 6.2c1.8 1.5 1.8 4.1 0 5.6M13.7 4.3c3 2.6 3 6.8 0 9.4" stroke="#fff" stroke-width="1.4" stroke-linecap="round" fill="none"/></svg></span>{% endif %}
       <button class="sel-circle" onclick="toggleSel(event, this)"></button>
-      <a class="dl-icon" href="/photo/{{ f }}" download="{{ f }}" onclick="event.stopPropagation()">
+      <a class="dl-icon" href="/photo/{{ f }}" download="{{ f }}" onclick="downloadFile(event, '{{ f }}')">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
           <path d="M8 1v9M4 7l4 4 4-4M2 14h12" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
@@ -882,6 +932,8 @@ body:has(#sel-bar.open) #dl-progress {
   <div class="viewer-body" id="viewer-body" onclick="if(window.innerWidth>=1200)closeViewer()">
     <div class="spinner" id="spinner"></div>
     <img id="viewer-img" src="" alt="" onload="imgLoaded()" onerror="imgFailed()" onclick="event.stopPropagation()" style="display:none;">
+    <span class="audio-badge viewer-audio-badge" id="viewer-audio-badge" aria-label="Moment"><svg viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg"><path d="M2 7h3l4-3v10l-4-3H2z" fill="#fff"/><path d="M11.5 6.2c1.8 1.5 1.8 4.1 0 5.6M13.7 4.3c3 2.6 3 6.8 0 9.4" stroke="#fff" stroke-width="1.4" stroke-linecap="round" fill="none"/></svg></span>
+    <audio id="viewer-audio" preload="auto"></audio>
     <button class="side-nav left-nav" onclick="event.stopPropagation();stepViewer(-1)"><svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
     <button class="side-nav right-nav" onclick="event.stopPropagation();stepViewer(1)"><svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg"><path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
   </div>
@@ -949,6 +1001,7 @@ body:has(#sel-bar.open) #dl-progress {
 let allFiles = {{ files_json | safe }};
 let files = allFiles.slice();
 const gifs = new Set({{ gifs_json | safe }});
+const audioPhotos = new Set({{ audio_json | safe }});
 const sizes = {{ sizes_json | safe }};   // filename -> bytes
 const selected = new Set();
 
@@ -974,6 +1027,7 @@ const itemEls = {};
 if (grid) document.querySelectorAll('.item').forEach(el => { itemEls[el.dataset.file] = el; });
 
 function isGif(f) { return gifs.has(f); }
+function hasAudio(f) { return audioPhotos.has(f); }
 
 function matchesFilter(f) {
     if (curFilter === 'photos') return !isGif(f);
@@ -1116,6 +1170,9 @@ function openViewer(el) {
 }
 
 function closeViewer() {
+    const audio = document.getElementById('viewer-audio');
+    audio.pause();
+    audio.removeAttribute('src');
     document.getElementById('viewer').classList.remove('open');
     document.body.style.position = '';
     document.body.style.top = '';
@@ -1144,6 +1201,22 @@ function updateViewer() {
     const spinner = document.getElementById('spinner');
     const f = files[viewerIdx];
     const gif = isGif(f);
+    const audio = document.getElementById('viewer-audio');
+    const audioBadge = document.getElementById('viewer-audio-badge');
+    audio.pause();
+    audio.currentTime = 0;
+    audioBadge.classList.remove('playing');
+    audio.onplay = () => audioBadge.classList.add('playing');
+    audio.onpause = () => audioBadge.classList.remove('playing');
+    audio.onended = () => audioBadge.classList.remove('playing');
+    if (hasAudio(f)) {
+        audio.src = '/audio/' + encodeURIComponent(f.replace(/[.]jpg$/i, '.wav'));
+        audioBadge.style.display = 'flex';
+        audio.play().catch(() => { /* browser may require one more user gesture */ });
+    } else {
+        audio.removeAttribute('src');
+        audioBadge.style.display = 'none';
+    }
     resetZoom(false);   // each image opens unzoomed
     img.style.display = 'none';
     spinner.classList.add('active');
@@ -1156,6 +1229,7 @@ function updateViewer() {
     const dl = document.getElementById('viewer-dl');
     dl.href = '/photo/' + f;
     dl.download = f;
+    dl.onclick = hasAudio(f) ? (event => downloadFile(event, f)) : null;
 }
 
 function imgLoaded() {
@@ -1417,9 +1491,33 @@ function deselectAll() {
     document.getElementById('sel-bar').classList.remove('open');
 }
 
+function postZip(filenames) {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/download-zip';
+    filenames.forEach(f => {
+        const inp = document.createElement('input');
+        inp.type = 'hidden';
+        inp.name = 'files';
+        inp.value = f;
+        form.appendChild(inp);
+    });
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+}
+
+function downloadFile(event, f) {
+    event.stopPropagation();
+    if (!hasAudio(f)) return true;
+    event.preventDefault();
+    postZip([f]);
+    return false;
+}
+
 function downloadSelected() {
     // A single selection downloads the image itself, not a one-file zip.
-    if (selected.size === 1) {
+    if (selected.size === 1 && !hasAudio([...selected][0])) {
         const f = [...selected][0];
         const a = document.createElement('a');
         a.href = '/photo/' + encodeURIComponent(f);
@@ -1551,6 +1649,7 @@ async function deleteCurrent() {
     if (el) el.remove();
     delete itemEls[f];
     selected.delete(f);
+    audioPhotos.delete(f);
     const aidx = allFiles.indexOf(f);
     if (aidx !== -1) allFiles.splice(aidx, 1);
     refreshSelBar();
@@ -1578,6 +1677,7 @@ async function deleteSelected() {
             if (el) el.remove();
             delete itemEls[f];
             selected.delete(f);
+            audioPhotos.delete(f);
             let idx = allFiles.indexOf(f);
             if (idx !== -1) allFiles.splice(idx, 1);
         });
@@ -1796,16 +1896,21 @@ def index():
     # changing a selector never reloads the page.
     files = list_media()
     gif_set = [f for f in files if f.lower().endswith(".gif")]
+    audio_set = [f for f in files if paired_audio_filename(f)]
     sizes = {}
     for f in files:
         try:
             sizes[f] = os.path.getsize(os.path.join(PHOTOS_DIR, f))
+            audio_name = paired_audio_filename(f)
+            if audio_name:
+                sizes[f] += os.path.getsize(os.path.join(PHOTOS_DIR, audio_name))
         except OSError:
             sizes[f] = 0
     html = render_template_string(
-        HTML, files=files, count=len(files), has_media=bool(files),
+        HTML, files=files, audio_set=set(audio_set), count=len(files), has_media=bool(files),
         free_space=get_free_space(),
         files_json=json.dumps(files), gifs_json=json.dumps(gif_set),
+        audio_json=json.dumps(audio_set),
         sizes_json=json.dumps(sizes)
     )
     # The page embeds all CSS/JS inline, so never let the browser serve a stale
@@ -1829,6 +1934,13 @@ def font(filename):
 @app.route("/photo/<filename>")
 def photo(filename):
     return send_from_directory(PHOTOS_DIR, filename, as_attachment=True)
+
+
+@app.route("/audio/<filename>")
+def audio(filename):
+    if not filename.lower().endswith(".wav"):
+        return "Not found", 404
+    return send_from_directory(PHOTOS_DIR, filename, mimetype="audio/wav")
 
 
 THUMB_DIR = os.path.join(PHOTOS_DIR, ".thumbs")
@@ -1976,9 +2088,16 @@ def delete_photos():
     data = request.get_json()
     filenames = data.get("files", [])
     for f in filenames:
-        path = os.path.join(PHOTOS_DIR, os.path.basename(f))
+        base = os.path.basename(f)
+        path = os.path.join(PHOTOS_DIR, base)
         if os.path.exists(path):
             os.remove(path)
+        audio_name = paired_audio_filename(base)
+        if audio_name:
+            try:
+                os.remove(os.path.join(PHOTOS_DIR, audio_name))
+            except OSError:
+                pass
         for size in [400, 1200]:
             cache = get_thumb_path(os.path.basename(f), size)
             if os.path.exists(cache):
@@ -1988,7 +2107,7 @@ def delete_photos():
 
 @app.route("/download-zip", methods=["POST"])
 def download_zip():
-    filenames = request.form.getlist("files")
+    filenames = expand_with_paired_audio(request.form.getlist("files"))
     token = request.form.get("download_token", "")
     paths = []
     for f in filenames:
@@ -1996,6 +2115,13 @@ def download_zip():
         p = os.path.join(PHOTOS_DIR, base)
         if os.path.exists(p):
             paths.append((p, base))
+
+    archive_name = "optocam_photos.zip"
+    if len(paths) == 2:
+        stems = {os.path.splitext(name)[0] for _, name in paths}
+        exts = {os.path.splitext(name)[1].lower() for _, name in paths}
+        if len(stems) == 1 and exts == {".jpg", ".wav"}:
+            archive_name = next(iter(stems)) + ".zip"
 
     # Approximate the final ZIP_STORED size as the progress denominator.
     total = 22
@@ -2072,7 +2198,7 @@ def download_zip():
     return Response(
         generate(),
         mimetype="application/zip",
-        headers={"Content-Disposition": "attachment; filename=optocam_photos.zip"}
+        headers={"Content-Disposition": f"attachment; filename={archive_name}"}
     )
 
 

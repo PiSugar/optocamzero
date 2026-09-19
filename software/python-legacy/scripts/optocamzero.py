@@ -97,6 +97,48 @@ import gc
 import subprocess
 log("All imports done")
 
+# MOMENT mode is exposed only when ALSA reports the Whisplay sound card.
+# Keep the numeric hw address found at boot: it is stable for this process and
+# avoids depending on the kernel's sanitized card-id spelling.
+def _find_whisplay_alsa_device(command):
+    if not WHISPLAY_MODE:
+        return None
+    try:
+        result = subprocess.run(
+            [command, "-l"], capture_output=True, text=True, timeout=2,
+            check=False,
+        )
+        for line in result.stdout.splitlines():
+            # ALSA exposes the unified driver as either "whisplay-sound"
+            # or the sanitized card id/name "whisplaysound" / "Whisplay Sound".
+            normalized = "".join(ch for ch in line.lower() if ch.isalnum())
+            if "whisplaysound" not in normalized:
+                continue
+            # Typical ALSA line: card 2: ... [whisplay-sound], device 0: ...
+            import re
+            match = re.search(r"card\s+(\d+):.*device\s+(\d+):", line, re.I)
+            if match:
+                return f"plughw:{match.group(1)},{match.group(2)}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+WHISPLAY_AUDIO_CAPTURE = _find_whisplay_alsa_device("arecord")
+WHISPLAY_AUDIO_PLAYBACK = _find_whisplay_alsa_device("aplay")
+WHISPLAY_AUDIO_AVAILABLE = (
+    WHISPLAY_AUDIO_CAPTURE is not None and WHISPLAY_AUDIO_PLAYBACK is not None
+)
+if WHISPLAY_MODE:
+    log("Whisplay audio card " + ("detected" if WHISPLAY_AUDIO_AVAILABLE else "not detected"))
+
+def refresh_whisplay_audio_devices():
+    global WHISPLAY_AUDIO_CAPTURE, WHISPLAY_AUDIO_PLAYBACK, WHISPLAY_AUDIO_AVAILABLE
+    WHISPLAY_AUDIO_CAPTURE = _find_whisplay_alsa_device("arecord")
+    WHISPLAY_AUDIO_PLAYBACK = _find_whisplay_alsa_device("aplay")
+    WHISPLAY_AUDIO_AVAILABLE = (
+        WHISPLAY_AUDIO_CAPTURE is not None and WHISPLAY_AUDIO_PLAYBACK is not None
+    )
+
 # ── Early-start readiness waits ───────────────────────────────────────────────
 # camera-auto.service starts before udev coldplug finishes, so the heavy imports
 # above (numpy, picamera2, PIL) overlap kernel device bring-up instead of running
@@ -472,7 +514,7 @@ def get_filter_indicator(filter_name):
 # then cycled per frame — so the animation costs nothing extra at draw time.
 _GIF_PILL_PHASES   = 2     # number of pre-rendered dash offsets (one loop)
 _GIF_PILL_MARCH_HZ = 4     # phases advanced per second → marching speed
-_gif_indicator_phases = None
+_mode_indicator_phases = {}
 
 def _trace_capsule_perimeter(x0, y0, x1, y1, cr, step=1.5):
     """Ordered points around a horizontal capsule (pill) perimeter, used to lay
@@ -506,7 +548,7 @@ def _draw_dashed_path(draw, pts, phase, dash, gap, width, fill):
             draw.line([p, q], fill=fill, width=width)
         acc += math.hypot(q[0] - p[0], q[1] - p[1])
 
-def _build_gif_indicator_phases():
+def _build_mode_indicator_phases(label):
     # Rendered at SxS supersample then scaled down with LANCZOS so the dashes
     # come out smooth and anti-aliased instead of jagged. One-time cost.
     from PIL import ImageDraw, ImageFilter
@@ -514,7 +556,6 @@ def _build_gif_indicator_phases():
     big_w = PREVIEW_WIDTH * S
     big_h = PREVIEW_HEIGHT * S
     font = load_font(24 * S)
-    label = "GIF"
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     tb = tmp.textbbox((0, 0), label, font=font)
     # Sits directly under the filter pill (top-right), sharing its right edge.
@@ -550,10 +591,12 @@ def _build_gif_indicator_phases():
     return layers
 
 def get_gif_mode_indicator(phase_index=0):
-    global _gif_indicator_phases
-    if _gif_indicator_phases is None:
-        _gif_indicator_phases = _build_gif_indicator_phases()
-    return _gif_indicator_phases[phase_index % _GIF_PILL_PHASES]
+    return get_capture_mode_indicator("GIF", phase_index)
+
+def get_capture_mode_indicator(label, phase_index=0):
+    if label not in _mode_indicator_phases:
+        _mode_indicator_phases[label] = _build_mode_indicator_phases(label)
+    return _mode_indicator_phases[label][phase_index % _GIF_PILL_PHASES]
 
 _font_cache = {}  # v2: cache loaded fonts so TTF isn't re-opened every frame
 _font_warned = False
@@ -583,6 +626,8 @@ def _default_settings():
         "filter": "Film Standard",
         "awb": "Daylight",
         "gif_mode": False,
+        # None lets older settings migrate from the legacy gif_mode boolean.
+        "capture_mode": None,
     }
 
 def load_settings():
@@ -603,6 +648,7 @@ def save_settings():
         "filter": FILTERS[filter_index],
         "awb": AWB_MODES[awb_mode_index][1],
         "gif_mode": bool(gif_mode),
+        "capture_mode": capture_mode,
     }
     tmp_path = SETTINGS_PATH + ".tmp"
     try:
@@ -1034,6 +1080,280 @@ def show_transfer_mode_screen():
     display_image(img)
 
 GALLERY_DIR = os.path.join(OPTOCAM_HOME, "photos")
+AUDIO_MIN_SECONDS = 1.0
+AUDIO_MAX_SECONDS = 10.0
+
+def paired_audio_path(image_path):
+    return os.path.splitext(image_path)[0] + ".wav"
+
+def _draw_sound_icon(draw, x, y, color=(255, 255, 255), scale=1):
+    """Draw a small speaker glyph without relying on a font glyph."""
+    w = max(1, scale)
+    draw.polygon([
+        (x, y + 7*w), (x + 5*w, y + 7*w), (x + 11*w, y + 2*w),
+        (x + 11*w, y + 18*w), (x + 5*w, y + 13*w), (x, y + 13*w),
+    ], fill=color)
+    draw.arc((x + 8*w, y + 4*w, x + 20*w, y + 16*w), -55, 55, fill=color, width=2*w)
+    draw.arc((x + 7*w, y, x + 25*w, y + 20*w), -50, 50, fill=color, width=2*w)
+
+def _stop_process(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+
+_shutter_pcm = None
+
+def _build_shutter_pcm():
+    """Create a short, deterministic two-stage mechanical shutter sound."""
+    global _shutter_pcm
+    if _shutter_pcm is not None:
+        return _shutter_pcm
+    import math
+    import struct
+    sample_rate = 16000
+    sample_count = int(sample_rate * 0.11)
+    rng = 0x4f50544f
+    samples = bytearray()
+    for i in range(sample_count):
+        t = i / sample_rate
+        rng = (1103515245 * rng + 12345) & 0x7fffffff
+        noise = (rng / 0x3fffffff) - 1.0
+        first = math.exp(-70.0 * t) * (
+            0.55 * noise + 0.22 * math.sin(2.0 * math.pi * 1900.0 * t)
+        )
+        t2 = t - 0.045
+        second = 0.0
+        if t2 >= 0:
+            second = math.exp(-55.0 * t2) * (
+                0.42 * noise + 0.18 * math.sin(2.0 * math.pi * 1250.0 * t2)
+            )
+        value = max(-1.0, min(1.0, first + second))
+        samples.extend(struct.pack("<h", int(value * 19000)))
+    _shutter_pcm = bytes(samples)
+    return _shutter_pcm
+
+def play_shutter_sound():
+    """Play the shutter asynchronously so camera capture is never delayed."""
+    if not WHISPLAY_AUDIO_PLAYBACK or audio_recording:
+        return
+    pcm = _build_shutter_pcm()
+
+    def worker():
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    "aplay", "-q", "-D", WHISPLAY_AUDIO_PLAYBACK,
+                    "-t", "raw", "-f", "S16_LE", "-r", "16000", "-c", "1", "-",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            proc.communicate(pcm, timeout=1)
+        except (OSError, subprocess.SubprocessError):
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+def start_audio_recording():
+    global audio_prompt_active, audio_prompt_background
+    global audio_recording, audio_record_started, audio_record_process, audio_too_short_until
+    if (not audio_prompt_active or audio_recording or audio_finalize_pending
+            or not WHISPLAY_AUDIO_CAPTURE):
+        return
+    if audio_photo_save_event.is_set() and not audio_prompt_ready:
+        print("✗ Audio skipped because photo save failed")
+        audio_prompt_active = False
+        audio_prompt_background = None
+        hardware_feedback("error")
+        return
+    final_path = paired_audio_path(audio_prompt_image)
+    tmp_path = final_path + ".tmp"
+    try:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        audio_record_process = subprocess.Popen([
+            "arecord", "-q", "-D", WHISPLAY_AUDIO_CAPTURE,
+            "-t", "wav", "-f", "S16_LE", "-r", "16000", "-c", "1",
+            "-d", str(int(AUDIO_MAX_SECONDS)), tmp_path,
+        ])
+        audio_record_started = time.monotonic()
+        audio_recording = True
+        audio_too_short_until = 0.0
+        hardware_feedback("record")
+        print("🎙 AUDIO RECORD")
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"✗ Audio record error: {exc}")
+        hardware_feedback("error")
+        finish_audio_recording()
+
+def finish_audio_recording():
+    global audio_prompt_active, audio_prompt_ready, audio_prompt_background
+    global audio_recording, audio_record_started, audio_record_process
+    global audio_too_short_until, audio_finalize_pending
+    duration = time.monotonic() - audio_record_started if audio_record_started else 0
+    proc = audio_record_process
+    audio_record_process = None
+    _stop_process(proc)
+    audio_recording = False
+    final_path = paired_audio_path(audio_prompt_image) if audio_prompt_image else None
+    tmp_path = final_path + ".tmp" if final_path else None
+    saved = False
+    valid_duration = False
+    if tmp_path and duration >= AUDIO_MIN_SECONDS:
+        try:
+            import wave
+            with wave.open(tmp_path, "rb") as wav:
+                valid_duration = wav.getnframes() / float(wav.getframerate()) >= AUDIO_MIN_SECONDS
+            if valid_duration:
+                # Recording may finish before the background JPEG write. Wait
+                # only at final pairing time; recording itself starts at once.
+                audio_finalize_pending = True
+                photo_done = audio_photo_save_event.wait(timeout=15)
+                if photo_done and audio_prompt_ready and os.path.exists(audio_prompt_image):
+                    saved = True
+            if saved:
+                os.replace(tmp_path, final_path)
+                print(f"✓ Saved {os.path.basename(final_path)} ({min(duration, AUDIO_MAX_SECONDS):.1f}s)")
+                hardware_feedback("saved")
+            elif valid_duration:
+                print("✗ Audio discarded because photo was not saved")
+                hardware_feedback("error")
+        except (OSError, EOFError, wave.Error) as exc:
+            print(f"✗ Audio save error: {exc}")
+            saved = False
+        finally:
+            audio_finalize_pending = False
+    if tmp_path and os.path.exists(tmp_path):
+        try: os.remove(tmp_path)
+        except OSError: pass
+    too_short = duration > 0 and not valid_duration
+    if too_short:
+        print("Audio shorter than 1 second — discarded")
+        audio_too_short_until = time.monotonic() + 1.8
+        hardware_feedback("error")
+    audio_record_started = 0
+    if not too_short:
+        audio_prompt_active = False
+        audio_prompt_ready = False
+        audio_prompt_background = None
+
+def show_audio_record_screen():
+    from PIL import ImageDraw
+    if audio_prompt_background is not None:
+        img = audio_prompt_background.copy().convert("RGBA")
+    else:
+        img = Image.new("RGBA", (240, 240), (18, 18, 18, 255))
+
+    # Keep the freshly captured photo visible while presenting a compact modal
+    # in the same soft, monochrome style as the rest of the camera UI.
+    dim = Image.new("RGBA", (240, 240), (0, 0, 0, 20))
+    img = Image.alpha_composite(img, dim)
+    modal = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+    md = ImageDraw.Draw(modal)
+    md.rounded_rectangle((22, 38, 218, 202), radius=18,
+                         fill=(8, 8, 8, 105))
+    img = Image.alpha_composite(img, modal)
+    draw = ImageDraw.Draw(img)
+
+    too_short = audio_too_short_until > time.monotonic()
+    icon_color = (170, 170, 170, 255) if too_short else (255, 255, 255, 255)
+    _draw_sound_icon(draw, 108, 52, color=icon_color, scale=1)
+    photo_saving = not audio_photo_save_event.is_set()
+    if (photo_saving or audio_finalize_pending) and not too_short:
+        # Ten frames per second is enough for a smooth lightweight spinner on
+        # the small display while the full-resolution JPEG is being written.
+        spinner_start = int(time.monotonic() * 360) % 360
+        draw.arc((101, 45, 139, 83), spinner_start, spinner_start + 105,
+                 fill=(255, 255, 255, 235), width=2)
+    title = ("TOO SHORT" if too_short else
+             ("RECORDING" if audio_recording else
+              ("SAVING" if audio_finalize_pending else "ADD SOUND")))
+    hint = ("Sound not saved" if too_short else
+            ("Release to save" if audio_recording else
+             ("Please wait" if audio_finalize_pending else "Hold button to record")))
+    remaining = max(0.0, AUDIO_MAX_SECONDS - (time.monotonic() - audio_record_started)) if audio_recording else AUDIO_MAX_SECONDS
+    rows = [
+        (title, load_font(23), 86, (255, 255, 255, 255)),
+        (hint, load_font(15), 121, (185, 185, 185, 255)),
+    ]
+    if too_short:
+        rows.append(("Hold at least 1 second", load_font(13), 158, (125, 125, 125, 255)))
+    elif audio_recording:
+        # Remaining-time bar starts full and retreats from right to left.
+        bar_x0, bar_y0, bar_x1, bar_y1 = 46, 151, 194, 160
+        bar_layer = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+        bar_draw = ImageDraw.Draw(bar_layer)
+        bar_draw.rounded_rectangle((bar_x0, bar_y0, bar_x1, bar_y1), radius=4,
+                                   fill=(255, 255, 255, 45))
+        fill_x1 = bar_x0 + int((bar_x1 - bar_x0) * (remaining / AUDIO_MAX_SECONDS))
+        if fill_x1 > bar_x0:
+            bar_draw.rounded_rectangle((bar_x0, bar_y0, fill_x1, bar_y1), radius=4,
+                                       fill=(255, 255, 255, 235))
+        img = Image.alpha_composite(img, bar_layer)
+        draw = ImageDraw.Draw(img)
+        rows.append((f"{remaining:.1f}s", load_font(14), 169, (150, 150, 150, 255)))
+    elif not audio_finalize_pending:
+        rows.extend([
+            ("Tap to skip", load_font(14), 158, (125, 125, 125, 255)),
+            ("1–10 seconds", load_font(13), 178, (100, 100, 100, 255)),
+        ])
+    for text, font, y, color in rows:
+        box = draw.textbbox((0, 0), text, font=font)
+        draw.text(((240 - (box[2] - box[0])) // 2, y), text, font=font, fill=color)
+    display_image(img.convert("RGB"))
+
+def stop_gallery_audio(reset_file=True):
+    global gallery_audio_process, gallery_audio_file
+    _stop_process(gallery_audio_process)
+    gallery_audio_process = None
+    if reset_file:
+        gallery_audio_file = None
+
+def play_gallery_audio_once(image_path):
+    global gallery_audio_process, gallery_audio_file
+    wav_path = paired_audio_path(image_path)
+    if gallery_audio_file == wav_path:
+        return
+    stop_gallery_audio()
+    gallery_audio_file = wav_path
+    if not WHISPLAY_AUDIO_PLAYBACK or not os.path.exists(wav_path):
+        return
+    try:
+        gallery_audio_process = subprocess.Popen([
+            "aplay", "-q", "-D", WHISPLAY_AUDIO_PLAYBACK, wav_path,
+        ])
+    except OSError as exc:
+        print(f"✗ Audio playback error: {exc}")
+
+def gallery_audio_is_playing(image_path):
+    return bool(
+        gallery_audio_file == paired_audio_path(image_path)
+        and gallery_audio_process is not None
+        and gallery_audio_process.poll() is None
+    )
+
+def refresh_gallery_audio_state():
+    """Return True once when playback ends so the icon can be dimmed."""
+    global gallery_audio_process
+    if gallery_audio_process is not None and gallery_audio_process.poll() is not None:
+        gallery_audio_process = None
+        return True
+    return False
 
 _capture_counter = None
 _capture_counter_lock = threading.Lock()
@@ -1113,6 +1433,17 @@ def display_gallery_image(filepath, index, total, confirm_delete=False):
         img = img.convert("RGB")
         draw = ImageDraw.Draw(img)
         draw.text((x, y), text, font=font, fill=(255, 255, 255))
+
+        # Audio-photo marker in the opposite corner from the counter.
+        if os.path.exists(paired_audio_path(filepath)):
+            marker = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+            marker_draw = ImageDraw.Draw(marker)
+            marker_draw.ellipse((196, 196, 228, 228), fill=(0, 0, 0, 135))
+            icon_color = ((255, 255, 255, 255) if gallery_audio_is_playing(filepath)
+                          else (155, 155, 155, 255))
+            _draw_sound_icon(marker_draw, 201, 202, color=icon_color)
+            img = Image.alpha_composite(img.convert("RGBA"), marker).convert("RGB")
+            draw = ImageDraw.Draw(img)
 
         # Delete confirmation dialog
         if confirm_delete:
@@ -1230,9 +1561,10 @@ def start_gif_gallery_load(filepath, index, total):
         print(f"GIF gallery load error: {e}")
     return frames
 
-def _save_image_async(captured_image, filepath, filename, film_name="No Filter"):
+def _save_image_async(captured_image, filepath, filename, film_name="No Filter", add_audio=False):
     """Save and verify image in background — runs after preview has already resumed"""
-    global saving_active
+    global saving_active, audio_prompt_active, audio_prompt_ready, audio_prompt_background
+    saved = False
     try:
         start = time.time()
         captured_image = _apply_filter_by_name(captured_image, film_name)
@@ -1270,20 +1602,29 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter")
             return
 
         print(f"✓ Saved {filename} ({file_size/1024/1024:.2f} MB) in {time.time()-start:.2f}s")
+        saved = True
+        if add_audio:
+            audio_prompt_background = captured_image.resize((240, 240), Image.BILINEAR).convert("RGB")
+            audio_prompt_ready = True
         hardware_feedback("saved")
     except Exception as e:
         print(f"✗ Save error: {e}")
         hardware_feedback("error")
     finally:
+        if add_audio and not saved:
+            audio_prompt_ready = False
+        if add_audio:
+            audio_photo_save_event.set()
         with _save_active_lock:
             saving_active -= 1
 
-def capture_full_res(picam2):
+def capture_full_res(picam2, add_audio=False):
     """
     Capture full-res image. Camera operations run under lock.
     Preview resumes immediately after camera is free — save happens in background.
     """
     global capturing, camera_started, show_focus, config_cache, saving_active
+    global audio_prompt_active, audio_prompt_ready, audio_prompt_image, audio_prompt_background
     captured_image = None
     filepath = None
     filename = None
@@ -1386,9 +1727,18 @@ def capture_full_res(picam2):
         # Save in background — filter applied inside thread, doesn't block preview
         with _save_active_lock:
             saving_active += 1
+        if add_audio and WHISPLAY_AUDIO_AVAILABLE:
+            audio_prompt_image = filepath
+            # Show the captured frame immediately; the filtered saved version
+            # replaces this preview as soon as the background save completes.
+            audio_prompt_background = captured_image.resize((240, 240), Image.BILINEAR).convert("RGB")
+            audio_prompt_ready = False
+            audio_prompt_active = True
+            audio_photo_save_event.clear()
+
         threading.Thread(
             target=_save_image_async,
-            args=(captured_image, filepath, filename, FILTERS[filter_index]),
+            args=(captured_image, filepath, filename, FILTERS[filter_index], add_audio),
             daemon=True
         ).start()
 
@@ -1635,6 +1985,8 @@ def button_handler():
     global transfer_mode, transfer_screen_shown, _transfer_last_activity, _transfer_dimmed
     global _idle_last_activity, _idle_dimmed
     global gif_mode, gif_record_requested, gif_mode_label_time, gif_cancel_requested
+    global capture_mode, audio_prompt_active, audio_prompt_ready, audio_prompt_background
+    global audio_recording, audio_too_short_until
 
     last_capture = 0
     last_preview = 0
@@ -1725,6 +2077,9 @@ def button_handler():
                             filepath = gallery_images[gallery_index]
                             try:
                                 os.remove(filepath)
+                                audio_path = paired_audio_path(filepath)
+                                if os.path.exists(audio_path):
+                                    os.remove(audio_path)
                                 print(f"✓ Deleted: {os.path.basename(filepath)}")
                                 hardware_feedback("delete")
                                 # Remove any cached thumbnails
@@ -1855,6 +2210,32 @@ def button_handler():
                 time.sleep(0.05)
                 continue
 
+            # MOMENT follow-up: holding the Whisplay button records, release
+            # saves it, and recordings shorter than one second are discarded.
+            if audio_prompt_active:
+                if audio_too_short_until:
+                    if time.monotonic() >= audio_too_short_until:
+                        audio_too_short_until = 0.0
+                        audio_prompt_active = False
+                        audio_prompt_ready = False
+                        audio_prompt_background = None
+                    time.sleep(0.02)
+                    continue
+                cap_is_down = not GPIO.input(BUTTON_CAPTURE)
+                if cap_is_down and not cap_was_down:
+                    cap_was_down = True
+                    cap_click_pending_at = 0
+                    start_audio_recording()
+                elif not cap_is_down and cap_was_down:
+                    cap_was_down = False
+                    if audio_recording:
+                        finish_audio_recording()
+                elif audio_recording and time.monotonic() - audio_record_started >= AUDIO_MAX_SECONDS:
+                    finish_audio_recording()
+                    cap_long_fired = True
+                time.sleep(0.02)
+                continue
+
             # --- Capture: click = shutter, double = AWB, hold = Photo/GIF ---
             cap_is_down = not GPIO.input(BUTTON_CAPTURE)
             cap_single_action = False
@@ -1890,10 +2271,14 @@ def button_handler():
                     cap_long_fired = True
                     cap_click_pending_at = 0
                     cap_double_candidate = False
-                    gif_mode = not gif_mode
+                    if WHISPLAY_MODE and not WHISPLAY_AUDIO_AVAILABLE:
+                        refresh_whisplay_audio_devices()
+                    modes = ["PHOTO", "GIF"] + (["MOMENT"] if WHISPLAY_AUDIO_AVAILABLE else [])
+                    capture_mode = modes[(modes.index(capture_mode) + 1) % len(modes)]
+                    gif_mode = capture_mode == "GIF"
                     gif_mode_label_time = now
                     save_settings()
-                    print(f"GIF mode {'ON' if gif_mode else 'OFF'}")
+                    print(f"Capture mode: {capture_mode}")
                     hardware_feedback("mode")
 
             elif not cap_is_down and cap_was_down:
@@ -1949,22 +2334,24 @@ def button_handler():
                             no_space_message_time = time.time()
                             print("✗ No space in card")
                             hardware_feedback("error")
-                        elif gif_mode:
+                        elif capture_mode == "GIF":
                             gif_record_requested = True
                             print("🎞 GIF RECORD")
                             hardware_feedback("record")
                         else:
                             capture_requested = True
                             print("📸 CAPTURE")
+                            play_shutter_sound()
                             hardware_feedback("shutter")
                     except:
-                        if gif_mode:
+                        if capture_mode == "GIF":
                             gif_record_requested = True
                             print("🎞 GIF RECORD")
                             hardware_feedback("record")
                         else:
                             capture_requested = True
                             print("📸 CAPTURE")
+                            play_shutter_sound()
                             hardware_feedback("shutter")
 
             # --- Preview toggle button ---
@@ -2082,12 +2469,28 @@ saving_active = 0
 _save_active_lock = threading.Lock()
 filter_label_time = 0
 isp_changed = False
-gif_mode = bool(_SETTINGS.get("gif_mode"))  # armed for GIF recording (toggled by long-press)
+capture_mode = str(_SETTINGS.get("capture_mode") or "").upper()
+if capture_mode == "AUDIO":
+    capture_mode = "MOMENT"  # migrate the pre-MOMENT development setting
+if capture_mode not in {"PHOTO", "GIF", "MOMENT"}:
+    capture_mode = "GIF" if _SETTINGS.get("gif_mode") else "PHOTO"
+gif_mode = capture_mode == "GIF"  # compatibility alias used by the GIF recorder
 gif_record_requested = False  # button thread → main loop: start a recording
 gif_recording = False         # True while record_gif() owns the camera/display
 gif_cancel_requested = False  # shutter press during recording → abort + discard
 gif_mode_label_time = 0       # transient "GIF" centre label timestamp
-save_settings()
+audio_prompt_active = False
+audio_prompt_ready = False
+audio_prompt_image = None
+audio_prompt_background = None
+audio_recording = False
+audio_record_started = 0.0
+audio_record_process = None
+audio_too_short_until = 0.0
+audio_finalize_pending = False
+audio_photo_save_event = threading.Event()
+gallery_audio_process = None
+gallery_audio_file = None
 _gif_anim_frames = []         # decoded frames of the GIF currently in the gallery
 _gif_anim_index = 0
 _gif_anim_last = 0.0
@@ -2118,7 +2521,9 @@ def main():
     global transfer_mode, transfer_screen_shown, _transfer_last_refresh, _transfer_last_activity, _transfer_dimmed
     global _idle_last_activity, _idle_dimmed
     global first_preview_frame_pending, cold_start_pending
-    global gif_mode, gif_record_requested, gif_recording, gif_mode_label_time
+    global gif_mode, gif_record_requested, gif_recording, gif_mode_label_time, capture_mode
+    global audio_prompt_active, audio_prompt_ready, audio_prompt_background
+    global audio_recording, audio_too_short_until
     global _gif_anim_frames, _gif_anim_index, _gif_anim_last, _gif_anim_file
 
     gc.disable()
@@ -2153,6 +2558,14 @@ def main():
     picam2 = Picamera2()
     config_cache = CameraConfigCache(picam2)
 
+    # ALSA may enumerate after this early-start service imports the module.
+    # Refresh once the camera/display startup work has given udev time to settle.
+    refresh_whisplay_audio_devices()
+    if capture_mode == "MOMENT" and not WHISPLAY_AUDIO_AVAILABLE:
+        capture_mode = "PHOTO"
+        gif_mode = False
+    save_settings()
+
     print("\n" + "=" * 50)
     print("FEATURES:")
     print("✓ Enhanced black levels")
@@ -2163,7 +2576,9 @@ def main():
     if WHISPLAY_MODE:
         print("✓ Whisplay click: Capture / Close gallery")
         print("✓ Whisplay double click: Next AWB / Previous gallery item")
-        print("✓ Whisplay hold: Toggle Photo/GIF mode")
+        print("✓ Whisplay hold: Cycle capture mode")
+        if WHISPLAY_AUDIO_AVAILABLE:
+            print("✓ MOMENT mode: Hold Whisplay button after capture to record 1–10s")
         print("✓ PiSugar double click: Next filter / Next gallery item")
         print("✓ PiSugar hold: Open gallery / Delete")
         if _whisplay.mode == "daemon":
@@ -2190,6 +2605,8 @@ def main():
                 print(f"warm indicator error: {e}")
         try:
             get_gif_mode_indicator(0)   # also warm the GIF-mode pill phases
+            if WHISPLAY_AUDIO_AVAILABLE:
+                get_capture_mode_indicator("MOMENT", 0)
         except Exception as e:
             print(f"warm gif pill error: {e}")
     threading.Thread(target=_warm_overlays, daemon=True).start()
@@ -2261,6 +2678,17 @@ def main():
                     show_transfer_mode_screen()
                 time.sleep(0.1)
 
+            # === MOMENT FOLLOW-UP ===
+            elif audio_prompt_active:
+                if camera_started:
+                    with camera_lock:
+                        if camera_started:
+                            picam2.stop()
+                            camera_started = False
+                set_backlight(True)
+                show_audio_record_screen()
+                time.sleep(0.05 if audio_recording else 0.1)
+
             # === GALLERY MODE ===
             elif gallery_active:
                 # Stop camera if running
@@ -2278,6 +2706,10 @@ def main():
                     total = len(gallery_images)
                     set_backlight(True)
                     is_gif = gallery_images[idx].lower().endswith(".gif")
+                    if gallery_confirm_delete:
+                        stop_gallery_audio(reset_file=False)
+                    else:
+                        play_gallery_audio_once(gallery_images[idx])
                     if is_gif and not gallery_confirm_delete:
                         # Show frame 0 now; the rest decode in the background and
                         # stream into this list, so navigation doesn't stall.
@@ -2305,10 +2737,17 @@ def main():
                         _gif_anim_index = (_gif_anim_index + 1) % len(_gif_anim_frames)
                         display_image(_gif_anim_frames[_gif_anim_index])
 
+                # Redraw a static MOMENT photo once playback finishes so its
+                # sound marker changes from bright white to the resting gray.
+                if refresh_gallery_audio_state():
+                    gallery_needs_update = True
+
                 time.sleep(0.02)
 
             # === PREVIEW MODE ===
             elif preview_active and not capturing:
+                if gallery_audio_file is not None:
+                    stop_gallery_audio()
                 if not camera_started:
                     with camera_lock:
                         set_backlight(True)
@@ -2329,7 +2768,7 @@ def main():
                     capture_dot_time = time.time()
                     threading.Thread(
                         target=capture_full_res,
-                        args=(picam2,),
+                        args=(picam2, capture_mode == "MOMENT"),
                         daemon=True
                     ).start()
 
@@ -2460,13 +2899,16 @@ def main():
                                     filter_label_time = 0
                                 if (centre_msg is None and gif_mode_label_time > 0
                                         and time.time() - gif_mode_label_time < 1.5):
-                                    centre_msg = "GIF Mode" if gif_mode else "Photo Mode"
+                                    centre_msg = (
+                                        "MOMENT Mode" if capture_mode == "MOMENT"
+                                        else f"{capture_mode.title()} Mode"
+                                    )
                                     centre_msg_start, centre_msg_dur = gif_mode_label_time, 1.5
                                 elif centre_msg is None and gif_mode_label_time > 0:
                                     gif_mode_label_time = 0
 
                                 # Visible GIF-pill phase (-1 when not armed) — only flips at the march rate
-                                gif_phase_mod = (int(time.time() * _GIF_PILL_MARCH_HZ) % _GIF_PILL_PHASES) if gif_mode else -1
+                                gif_phase_mod = (int(time.time() * _GIF_PILL_MARCH_HZ) % _GIF_PILL_PHASES) if capture_mode != "PHOTO" else -1
 
                                 # Filter pill bounces briefly after a filter change — while
                                 # popping it's animated on top, so pulled out of the cache then.
@@ -2478,7 +2920,8 @@ def main():
                                 # (The centre label and a popping pill are NOT in here —
                                 # they're animated on top below, so they never invalidate it.)
                                 hud_key = (awb_label, battery_val, iso_val, shutter_val,
-                                           FILTERS[filter_index], gif_phase_mod, pill_popping, awb_popping)
+                                           FILTERS[filter_index], capture_mode, gif_phase_mod,
+                                           pill_popping, awb_popping)
                                 if _hud_overlay_cache["key"] == hud_key:
                                     overlay = _hud_overlay_cache["img"]
                                 else:
@@ -2498,8 +2941,9 @@ def main():
                                             overlay, get_cached_shadow("awb", awb_label, ax, ay, font_awb))
                                     if not pill_popping:
                                         overlay = Image.alpha_composite(overlay, get_filter_indicator(FILTERS[filter_index]))
-                                    if gif_mode:
-                                        overlay = Image.alpha_composite(overlay, get_gif_mode_indicator(gif_phase_mod))
+                                    if capture_mode != "PHOTO":
+                                        overlay = Image.alpha_composite(
+                                            overlay, get_capture_mode_indicator(capture_mode, gif_phase_mod))
                                     _hud_overlay_cache["key"] = hud_key
                                     _hud_overlay_cache["img"] = overlay
 
@@ -2580,6 +3024,9 @@ def main():
         exit_requested = True
 
     finally:
+        if audio_recording:
+            finish_audio_recording()
+        stop_gallery_audio()
         with camera_lock:
             if camera_started:
                 picam2.stop()
