@@ -25,6 +25,11 @@ PISUGAR_EVENT_PORT = int(os.getenv("PISUGAR_EVENT_PORT", "8423"))
 APP_ID = "optocamzero"
 
 
+def binary_backlight_level(value) -> int:
+    """Pi Zero 2 W Whisplay backlight is stable only fully off or fully on."""
+    return 100 if float(value) > 0 else 0
+
+
 class VirtualGPIO:
     """Small RPi.GPIO-compatible input shim used by the legacy event loop."""
 
@@ -135,8 +140,7 @@ class WhisplayPWMProxy:
         pass
 
     def set_PWM_dutycycle(self, _pin, duty):
-        brightness = max(0, min(100, round(float(duty) * 100 / 255)))
-        self.backend.set_backlight(brightness)
+        self.backend.set_backlight(binary_backlight_level(duty))
 
     def stop(self):
         pass
@@ -291,7 +295,10 @@ class WhisplayBackend:
 
     def set_backlight(self, brightness):
         try:
-            self._request("backlight.set", {"brightness": int(brightness)})
+            self._request(
+                "backlight.set",
+                {"brightness": binary_backlight_level(brightness)},
+            )
         except Exception:
             pass
 
@@ -526,7 +533,7 @@ class StandaloneWhisplayBackend(WhisplayBackend):
         self.board.fill_screen(0)
 
     def set_backlight(self, brightness):
-        self.board.set_backlight(int(brightness))
+        self.board.set_backlight(binary_backlight_level(brightness))
 
     def set_rgb(self, r, g, b):
         self.board.set_rgb(int(r), int(g), int(b))

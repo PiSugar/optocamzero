@@ -38,6 +38,10 @@ pip3 install spidev pigpio
 echo -e "${YELLOW}[3/8] Copying scripts and assets...${NC}"
 cp "$SCRIPT_DIR/scripts/optocamzero.py"  "$INSTALL_HOME/optocamzero.py"
 cp "$SCRIPT_DIR/scripts/gallery_server.py" "$INSTALL_HOME/gallery_server.py"
+cp "$SCRIPT_DIR/scripts/magic_service.py" "$INSTALL_HOME/magic_service.py"
+if [ ! -f "$INSTALL_HOME/.env" ]; then
+    install -m 0600 "$SCRIPT_DIR/.env.example" "$INSTALL_HOME/.env"
+fi
 
 cp "$SCRIPT_DIR/assets/cmunvt.ttf"       "$INSTALL_HOME/cmunvt.ttf"
 cp "$SCRIPT_DIR/assets/optocamlogo.svg"  "$INSTALL_HOME/optocamlogo.svg"
@@ -52,6 +56,8 @@ mkdir -p "$INSTALL_HOME/photos"
 chown -R "$INSTALL_USER:$INSTALL_USER" \
     "$INSTALL_HOME/optocamzero.py" \
     "$INSTALL_HOME/gallery_server.py" \
+    "$INSTALL_HOME/magic_service.py" \
+    "$INSTALL_HOME/.env" \
     "$INSTALL_HOME/cmunvt.ttf" \
     "$INSTALL_HOME/optocamlogo.svg" \
     "$INSTALL_HOME/splash.raw" \

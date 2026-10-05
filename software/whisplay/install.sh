@@ -59,6 +59,7 @@ echo "Installing Optocam Zero to $APP_HOME..."
 install -d -m 0755 "$APP_HOME" "$APP_HOME/photos"
 install -m 0755 "$PYTHON_SOURCE/scripts/optocamzero.py" "$APP_HOME/optocamzero.py"
 install -m 0755 "$PYTHON_SOURCE/scripts/gallery_server.py" "$APP_HOME/gallery_server.py"
+install -m 0644 "$PYTHON_SOURCE/scripts/magic_service.py" "$APP_HOME/magic_service.py"
 install -m 0644 "$PYTHON_SOURCE/scripts/whisplay_adapter.py" "$APP_HOME/whisplay_adapter.py"
 install -m 0644 "$PYTHON_SOURCE/assets/cmunvt.ttf" "$APP_HOME/cmunvt.ttf"
 install -m 0644 "$PYTHON_SOURCE/assets/splash.raw" "$APP_HOME/splash.raw"
@@ -66,6 +67,9 @@ install -m 0644 "$PYTHON_SOURCE/assets/optocamlogo.svg" "$APP_HOME/optocamlogo.s
 install -m 0755 "$SCRIPT_DIR/run_optocamzero.sh" "$APP_HOME/run_optocamzero.sh"
 install -m 0755 "$SCRIPT_DIR/register_app.py" "$APP_HOME/register_app.py"
 install -m 0755 "$SCRIPT_DIR/autostart.py" "$APP_HOME/autostart.py"
+if [ ! -f "$APP_HOME/.env" ]; then
+    install -m 0600 "$SCRIPT_DIR/.env.example" "$APP_HOME/.env"
+fi
 if [ -f "$WHISPLAY_RUNTIME_SOURCE" ]; then
     install -m 0644 "$WHISPLAY_RUNTIME_SOURCE" "$APP_HOME/whisplay.py"
 elif [ "$MODE" = standalone ]; then

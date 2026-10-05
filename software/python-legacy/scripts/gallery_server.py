@@ -23,6 +23,13 @@ if GALLERY_MAX_AS_MB > 0:
         pass
 
 from flask import Flask, send_from_directory, render_template_string, Response, request
+from magic_service import (
+    MagicModeStore,
+    is_ai_generated,
+    read_magic_source_metadata,
+    read_magic_connection_settings,
+    save_magic_connection_settings,
+)
 
 OPTOCAM_HOME = os.path.abspath(os.getenv("OPTOCAM_HOME", "/home/dkumkum"))
 PHOTOS_DIR = os.path.abspath(os.getenv(
@@ -39,6 +46,8 @@ GALLERY_THREADED = os.getenv("OPTOCAM_GALLERY_THREADED", "1").lower() not in {
 MEDIA_EXTS = (".jpg", ".gif")
 
 app = Flask(__name__)
+MAGIC_MODE_STORE = MagicModeStore(os.path.join(OPTOCAM_HOME, "magic_modes.json"))
+MAGIC_ENV_PATH = os.path.join(OPTOCAM_HOME, ".env")
 
 # token -> {"sent": int, "total": int, "ts": float} — live zip download progress.
 DOWNLOAD_PROGRESS = {}
@@ -288,6 +297,50 @@ header {
     border-radius: 999px;        /* fully rounded ends → pill */
     z-index: 2;
     pointer-events: none;
+}
+.ai-badge {
+    position: absolute;
+    bottom: 7px;
+    right: 7px;
+    padding: 4px 7px 2px;
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #111;
+    background: #fff;
+    border-radius: 999px;
+    z-index: 2;
+    pointer-events: none;
+}
+.magic-badge, .magic-processing-badge {
+    position: absolute;
+    bottom: 7px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    pointer-events: none;
+}
+.magic-badge {
+    left: 7px;
+    color: #111;
+    background: #fff;
+}
+.magic-badge svg { width: 16px; height: 16px; }
+.magic-processing-badge {
+    right: 7px;
+    background: rgba(0,0,0,0.68);
+}
+.magic-processing-badge::before {
+    content: '';
+    width: 15px;
+    height: 15px;
+    border: 2px solid rgba(255,255,255,0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
 }
 .audio-badge {
     position: absolute;
@@ -720,6 +773,54 @@ header {
     margin-bottom: 20px;
     line-height: 1.6;
 }
+
+/* Magic-mode editor */
+#magic-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 450;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+    background: rgba(0,0,0,.82);
+}
+#magic-overlay.open { display: flex; }
+.magic-panel {
+    width: min(680px, 100%);
+    max-height: 88vh;
+    overflow: auto;
+    padding: 20px;
+    background: #101010;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+}
+.magic-head, .magic-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.magic-head { margin-bottom: 16px; }
+.magic-head h2 { font-size: 15px; letter-spacing: 1px; color:#fff; }
+.magic-config { padding: 4px 0 14px; }
+.magic-field { display:block; margin-top:12px; font-size:11px; letter-spacing:1px; color:#777; }
+.magic-field input[type="password"], .magic-field input[type="url"] {
+    width:100%; margin-top:7px; padding:10px; color:#eee; background:#080808;
+    border:1px solid #292929; border-radius:6px; font:13px 'CamFont', monospace;
+}
+.magic-key-state { display:block; margin-top:6px; color:#555; font-size:10px; }
+.magic-clear { display:flex; align-items:center; gap:8px; margin-top:9px; color:#777; font-size:10px; }
+.magic-row { border-top:1px solid #242424; padding:14px 0; }
+.magic-row input, .magic-row textarea {
+    width:100%; margin-top:8px; padding:10px; color:#eee; background:#080808;
+    border:1px solid #292929; border-radius:6px; font:13px 'CamFont', monospace;
+    -webkit-user-select:text; user-select:text;
+}
+.magic-row textarea { min-height:90px; resize:vertical; }
+.magic-actions { margin-top:16px; }
+.magic-panel button {
+    padding:8px 12px; color:#ddd; background:#181818; border:1px solid #333;
+    border-radius:7px; font:11px 'CamFont', monospace; letter-spacing:1px; cursor:pointer;
+}
+.magic-panel button.primary { color:#111; background:#fff; border-color:#fff; }
+.magic-remove { float:right; color:#d88 !important; }
+#magic-status { min-height:16px; margin-top:12px; color:#888; font-size:11px; }
 .confirm-btns { display: flex; gap: 10px; }
 .confirm-btns button {
     flex: 1;
@@ -818,6 +919,7 @@ body:has(#sel-bar.open) #dl-progress {
       <span>{{ count }} IMAGE{% if count != 1 %}S{% endif %}</span>
       <span>{{ free_space }} FREE</span>
     </div>
+    <div class="ctrl-group"><button onclick="openMagicEditor()">MAGIC</button></div>
     {% if has_media %}
     <div class="ctrl-group density-group" id="density-group">
       <button data-val="2" class="active" onclick="setDensity('2')" aria-label="2 columns">
@@ -892,6 +994,9 @@ body:has(#sel-bar.open) #dl-progress {
       </button>
       {% if f.lower().endswith('.gif') %}<span class="gif-badge">GIF</span><div class="grid-spin"></div>{% endif %}
       {% if f in audio_set %}<span class="audio-badge" aria-label="Moment"><svg viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg"><path d="M2 7h3l4-3v10l-4-3H2z" fill="#fff"/><path d="M11.5 6.2c1.8 1.5 1.8 4.1 0 5.6M13.7 4.3c3 2.6 3 6.8 0 9.4" stroke="#fff" stroke-width="1.4" stroke-linecap="round" fill="none"/></svg></span>{% endif %}
+      {% if f in ai_set %}<span class="ai-badge" aria-label="AI generated">AI</span>{% endif %}
+      {% if f in magic_set %}<span class="magic-badge" aria-label="Magic mode photo" title="Magic mode photo"><svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M5 15L15 5M12.5 3.5l4 4M4 3v3M2.5 4.5h3M15.5 13v4M13.5 15h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>{% endif %}
+      {% if f in magic_processing_set %}<span class="magic-processing-badge" aria-label="AI processing" title="AI processing"></span>{% endif %}
       <button class="sel-circle" onclick="toggleSel(event, this)"></button>
       <a class="dl-icon" href="/photo/{{ f }}" download="{{ f }}" onclick="downloadFile(event, '{{ f }}')">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
@@ -992,6 +1097,32 @@ body:has(#sel-bar.open) #dl-progress {
   </div>
 </div>
 
+<!-- Magic mode editor -->
+<div id="magic-overlay">
+  <div class="magic-panel">
+    <div class="magic-head">
+      <h2>MAGIC MODES</h2>
+      <button onclick="closeMagicEditor()">CLOSE</button>
+    </div>
+    <div class="magic-config">
+      <label class="magic-field">OPENAI API KEY
+        <input id="magic-api-key" type="password" autocomplete="new-password" placeholder="Enter OpenAI API key" onfocus="prepareApiKeyEdit()">
+        <span class="magic-key-state" id="magic-key-state"></span>
+      </label>
+      <label class="magic-clear"><input id="magic-clear-key" type="checkbox"> CLEAR SAVED API KEY</label>
+      <label class="magic-field">PROXY
+        <input id="magic-proxy" type="url" inputmode="url" placeholder="http://proxy.example:7890">
+      </label>
+    </div>
+    <div id="magic-list"></div>
+    <div class="magic-actions">
+      <button onclick="addMagicMode()">+ ADD MODE</button>
+      <button class="primary" onclick="saveMagicModes()">SAVE</button>
+    </div>
+    <div id="magic-status"></div>
+  </div>
+</div>
+
 <!-- Download progress pill -->
 <div id="dl-progress"><div id="dl-progress-fill"></div></div>
 
@@ -1002,8 +1133,143 @@ let allFiles = {{ files_json | safe }};
 let files = allFiles.slice();
 const gifs = new Set({{ gifs_json | safe }});
 const audioPhotos = new Set({{ audio_json | safe }});
+const aiPhotos = new Set({{ ai_json | safe }});
 const sizes = {{ sizes_json | safe }};   // filename -> bytes
 const selected = new Set();
+let magicModes = {{ magic_modes_json | safe }};
+let magicSettings = {{ magic_settings_json | safe }};
+let magicPhotoStates = {{ magic_photo_states_json | safe }};
+
+function magicStatusIsProcessing(status) {
+    return status === 'queued' || status === 'processing' || status === 'retrying';
+}
+
+async function pollMagicPhotoStates() {
+    if (!Object.values(magicPhotoStates).some(item => magicStatusIsProcessing(item.status))) return;
+    try {
+        const response = await fetch('/api/magic-photo-status', {cache: 'no-store'});
+        if (!response.ok) throw new Error('status request failed');
+        const nextStates = (await response.json()).photos || {};
+        let completed = false;
+        document.querySelectorAll('.item[data-file]').forEach(item => {
+            const filename = item.dataset.file;
+            const before = magicPhotoStates[filename];
+            const after = nextStates[filename];
+            if (before && magicStatusIsProcessing(before.status)
+                    && after && !magicStatusIsProcessing(after.status)) completed = true;
+            const badge = item.querySelector('.magic-processing-badge');
+            if (badge && (!after || !magicStatusIsProcessing(after.status))) badge.remove();
+        });
+        magicPhotoStates = nextStates;
+        if (completed && !magicEditorIsOpen()
+                && !document.getElementById('viewer').classList.contains('open')) {
+            location.reload();
+            return;
+        }
+    } catch (error) {
+        // A brief network interruption should not remove the processing icon.
+    }
+    if (Object.values(magicPhotoStates).some(item => magicStatusIsProcessing(item.status))) {
+        setTimeout(pollMagicPhotoStates, 3000);
+    }
+}
+setTimeout(pollMagicPhotoStates, 1500);
+
+function renderMagicSettings() {
+    const state = document.getElementById('magic-key-state');
+    state.textContent = magicSettings.api_key_configured
+        ? 'SAVED: ' + magicSettings.api_key_masked
+        : 'NOT CONFIGURED';
+    const input = document.getElementById('magic-api-key');
+    input.value = magicSettings.api_key_configured ? magicSettings.api_key_masked : '';
+    input.dataset.masked = magicSettings.api_key_configured ? 'true' : 'false';
+    document.getElementById('magic-clear-key').checked = false;
+    document.getElementById('magic-proxy').value = magicSettings.proxy || '';
+}
+
+function prepareApiKeyEdit() {
+    const input = document.getElementById('magic-api-key');
+    if (input.dataset.masked === 'true') {
+        input.value = '';
+        input.dataset.masked = 'false';
+    }
+}
+
+function renderMagicModes() {
+    const list = document.getElementById('magic-list');
+    list.textContent = '';
+    magicModes.forEach((mode, index) => {
+        const row = document.createElement('div');
+        row.className = 'magic-row';
+        row.dataset.id = mode.id || '';
+        const remove = document.createElement('button');
+        remove.className = 'magic-remove';
+        remove.textContent = 'REMOVE';
+        remove.onclick = () => { magicModes.splice(index, 1); renderMagicModes(); };
+        const title = document.createElement('input');
+        title.maxLength = 18;
+        title.placeholder = 'Mode name, e.g. Cheese';
+        title.value = mode.title || '';
+        title.oninput = () => { magicModes[index].title = title.value; };
+        const prompt = document.createElement('textarea');
+        prompt.maxLength = 2000;
+        prompt.placeholder = 'Transformation prompt';
+        prompt.value = mode.prompt || '';
+        prompt.oninput = () => { magicModes[index].prompt = prompt.value; };
+        row.append(remove, title, prompt);
+        list.appendChild(row);
+    });
+    if (!magicModes.length) {
+        const empty = document.createElement('div');
+        empty.className = 'magic-row';
+        empty.textContent = '> NO MAGIC MODES_';
+        list.appendChild(empty);
+    }
+}
+
+function openMagicEditor() {
+    cancelDragSelection();
+    renderMagicModes();
+    renderMagicSettings();
+    document.getElementById('magic-status').textContent = '';
+    document.getElementById('magic-overlay').classList.add('open');
+}
+function closeMagicEditor() { document.getElementById('magic-overlay').classList.remove('open'); }
+function addMagicMode() {
+    magicModes.push({id:'', title:'New Magic', prompt:'Describe how the photo should be transformed.'});
+    renderMagicModes();
+    document.querySelector('#magic-list .magic-row:last-child input')?.focus();
+}
+async function saveMagicModes() {
+    const status = document.getElementById('magic-status');
+    status.textContent = 'SAVING...';
+    try {
+        const apiKeyInput = document.getElementById('magic-api-key');
+        const apiKey = apiKeyInput.dataset.masked === 'true' ? '' : apiKeyInput.value;
+        const settingsResponse = await fetch('/api/magic-settings', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                api_key: apiKey,
+                clear_api_key: document.getElementById('magic-clear-key').checked,
+                proxy: document.getElementById('magic-proxy').value
+            })
+        });
+        if (!settingsResponse.ok) throw new Error(await settingsResponse.text());
+        magicSettings = await settingsResponse.json();
+        renderMagicSettings();
+        const response = await fetch('/api/magic-modes', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({modes: magicModes})
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const payload = await response.json();
+        magicModes = payload.modes;
+        renderMagicModes();
+        status.textContent = 'SAVED - LONG PRESS THE CAMERA BUTTON TO SELECT';
+    } catch (error) {
+        status.textContent = 'SAVE FAILED: ' + error.message;
+    }
+}
 
 function formatSize(bytes) {
     // Decimal units (1 MB = 1,000,000 bytes) to match how macOS/iOS report sizes.
@@ -1691,8 +1957,20 @@ async function deleteSelected() {
 let dragStart = null, dragMoved = false;
 const dragBox = document.getElementById('drag-select');
 
+function magicEditorIsOpen() {
+    return document.getElementById('magic-overlay').classList.contains('open');
+}
+
+function cancelDragSelection() {
+    dragStart = null;
+    dragMoved = false;
+    dragBox.style.display = 'none';
+    document.body.style.userSelect = '';
+}
+
 document.addEventListener('mousedown', e => {
     if (window.innerWidth < 1200) return;
+    if (magicEditorIsOpen() || e.target.closest('#magic-overlay,#confirm-overlay')) return;
     if (document.getElementById('viewer').classList.contains('open')) return;
     const blocked = e.target.closest('.img-btn,.sel-circle,.dl-icon,#sel-bar,#top-btn,header');
     if (blocked) return;
@@ -1703,6 +1981,7 @@ document.addEventListener('mousedown', e => {
 
 document.addEventListener('mousemove', e => {
     if (!dragStart) return;
+    if (magicEditorIsOpen()) { cancelDragSelection(); return; }
     const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
     if (!dragMoved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
     dragMoved = true;
@@ -1715,6 +1994,7 @@ document.addEventListener('mousemove', e => {
 
 document.addEventListener('mouseup', e => {
     if (!dragStart) return;
+    if (magicEditorIsOpen()) { cancelDragSelection(); return; }
     document.body.style.userSelect = '';
     dragBox.style.display = 'none';
     if (dragMoved) {
@@ -1731,8 +2011,7 @@ document.addEventListener('mouseup', e => {
         });
         refreshSelBar();
     }
-    dragStart = null;
-    dragMoved = false;
+    cancelDragSelection();
 });
 
 // ── Touch multi-select (mobile/tablet) ──
@@ -1890,6 +2169,65 @@ def get_free_space():
         return "?"
 
 
+def json_for_script(value):
+    """Serialize user-editable data without allowing a closing script tag."""
+    return (json.dumps(value, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+
+def get_magic_photo_states(files=None):
+    """Return browser-safe Magic state keyed by original photo filename."""
+    files = files if files is not None else list_media()
+    known_files = set(files)
+    states = {}
+    for filename in files:
+        metadata = read_magic_source_metadata(os.path.join(PHOTOS_DIR, filename))
+        if metadata:
+            states[filename] = {
+                "status": str(metadata.get("status") or "complete"),
+                "title": str(metadata.get("magic_mode_title") or "Magic")[:18],
+            }
+
+    # Backfill photos made before source-state sidecars were introduced by
+    # following the source reference already stored on generated AI photos.
+    for filename in files:
+        ai_path = os.path.join(PHOTOS_DIR, filename + ".ai.json")
+        try:
+            with open(ai_path, encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            source_name = os.path.basename(str(metadata.get("source") or ""))
+            if source_name in known_files:
+                states.setdefault(source_name, {
+                    "status": "complete",
+                    "title": str(metadata.get("magic_mode_title") or "Magic")[:18],
+                })
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+
+    # Also recognize jobs created by an older app process before its source
+    # sidecar was written, so a reboot never makes an active job look ordinary.
+    queue_dir = os.path.join(OPTOCAM_HOME, "magic_queue")
+    try:
+        queue_files = os.listdir(queue_dir)
+    except OSError:
+        queue_files = []
+    for job_name in queue_files:
+        if not job_name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(queue_dir, job_name), encoding="utf-8") as handle:
+                job = json.load(handle)
+            filename = os.path.basename(str(job.get("source_path") or ""))
+            if filename in known_files:
+                states.setdefault(filename, {
+                    "status": "queued",
+                    "title": str(job.get("title") or "Magic")[:18],
+                })
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    return states
+
+
 @app.route("/")
 def index():
     # All media, newest-first. Filtering and ordering happen client-side so
@@ -1897,6 +2235,10 @@ def index():
     files = list_media()
     gif_set = [f for f in files if f.lower().endswith(".gif")]
     audio_set = [f for f in files if paired_audio_filename(f)]
+    ai_set = [f for f in files if is_ai_generated(os.path.join(PHOTOS_DIR, f))]
+    magic_photo_states = get_magic_photo_states(files)
+    magic_modes = MAGIC_MODE_STORE.load()
+    magic_settings = read_magic_connection_settings(MAGIC_ENV_PATH)
     sizes = {}
     for f in files:
         try:
@@ -1907,10 +2249,19 @@ def index():
         except OSError:
             sizes[f] = 0
     html = render_template_string(
-        HTML, files=files, audio_set=set(audio_set), count=len(files), has_media=bool(files),
+        HTML, files=files, audio_set=set(audio_set), ai_set=set(ai_set),
+        magic_set=set(magic_photo_states),
+        magic_processing_set={
+            name for name, state in magic_photo_states.items()
+            if state["status"] in {"queued", "processing", "retrying"}
+        },
+        count=len(files), has_media=bool(files),
         free_space=get_free_space(),
         files_json=json.dumps(files), gifs_json=json.dumps(gif_set),
         audio_json=json.dumps(audio_set),
+        ai_json=json.dumps(ai_set), magic_modes_json=json_for_script(magic_modes),
+        magic_settings_json=json_for_script(magic_settings),
+        magic_photo_states_json=json_for_script(magic_photo_states),
         sizes_json=json.dumps(sizes)
     )
     # The page embeds all CSS/JS inline, so never let the browser serve a stale
@@ -1929,6 +2280,61 @@ def logo():
 @app.route("/font/<filename>")
 def font(filename):
     return send_from_directory(OPTOCAM_HOME, filename)
+
+
+@app.route("/api/magic-modes", methods=["GET", "POST"])
+def magic_modes_api():
+    if request.method == "POST":
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get("modes"), list):
+            return Response("Invalid modes", status=400, mimetype="text/plain")
+        modes = MAGIC_MODE_STORE.save(data["modes"])
+    else:
+        modes = MAGIC_MODE_STORE.load()
+    return Response(
+        json.dumps({"modes": modes}, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.route("/api/magic-settings", methods=["GET", "POST"])
+def magic_settings_api():
+    if request.method == "POST":
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return Response("Invalid settings", status=400, mimetype="text/plain")
+        api_key = data.get("api_key")
+        proxy = data.get("proxy")
+        if not isinstance(api_key, str) or len(api_key) > 512:
+            return Response("Invalid API key", status=400, mimetype="text/plain")
+        if not isinstance(proxy, str) or len(proxy) > 2048:
+            return Response("Invalid proxy", status=400, mimetype="text/plain")
+        try:
+            settings = save_magic_connection_settings(
+                MAGIC_ENV_PATH,
+                api_key=api_key,
+                clear_api_key=bool(data.get("clear_api_key")),
+                proxy=proxy,
+            )
+        except ValueError as exc:
+            return Response(str(exc), status=400, mimetype="text/plain")
+    else:
+        settings = read_magic_connection_settings(MAGIC_ENV_PATH)
+    return Response(
+        json.dumps(settings, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.route("/api/magic-photo-status")
+def magic_photo_status_api():
+    return Response(
+        json.dumps({"photos": get_magic_photo_states()}, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.route("/photo/<filename>")
@@ -2092,6 +2498,11 @@ def delete_photos():
         path = os.path.join(PHOTOS_DIR, base)
         if os.path.exists(path):
             os.remove(path)
+        for sidecar_suffix in (".ai.json", ".magic.json"):
+            try:
+                os.remove(path + sidecar_suffix)
+            except FileNotFoundError:
+                pass
         audio_name = paired_audio_filename(base)
         if audio_name:
             try:

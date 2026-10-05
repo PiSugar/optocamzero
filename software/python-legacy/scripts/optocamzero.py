@@ -73,6 +73,8 @@ else:
     log("spidev imported")
 import threading
 log("threading imported")
+from magic_service import MagicGenerationWorker, MagicModeStore, is_ai_generated, load_env_file
+load_env_file(os.path.join(OPTOCAM_HOME, ".env"))
 
 # Preload the two heavy modules that are NOT on the first-preview path —
 # picamera2 (~1.2s) and PIL.Image — on a background thread so they overlap with
@@ -620,6 +622,31 @@ def load_font(size):
 # ── Filters ────────────────────────────────────────────────────────────────
 FILTERS = ["Film Standard", "Punch", "B&W", "Deep", "Sand", "Eterna", "TRI-X", "Cutout", "No Filter"]
 SETTINGS_PATH = os.path.join(OPTOCAM_HOME, "settings.json")
+MAGIC_MODES_PATH = os.path.join(OPTOCAM_HOME, "magic_modes.json")
+magic_mode_store = MagicModeStore(MAGIC_MODES_PATH)
+
+def get_magic_modes():
+    return magic_mode_store.load()
+
+def get_magic_mode(mode_id):
+    return next((mode for mode in get_magic_modes() if mode["id"] == mode_id), None)
+
+def capture_mode_magic_id(mode=None):
+    selected = capture_mode if mode is None else mode
+    return selected[6:] if isinstance(selected, str) and selected.startswith("MAGIC:") else None
+
+def capture_mode_label(mode=None):
+    selected = capture_mode if mode is None else mode
+    magic_id = capture_mode_magic_id(selected)
+    if magic_id:
+        entry = get_magic_mode(magic_id)
+        return (entry["title"] if entry else "Magic").upper()[:12]
+    return selected
+
+def available_capture_modes():
+    modes = ["PHOTO", "GIF"] + (["MOMENT"] if WHISPLAY_AUDIO_AVAILABLE else [])
+    modes.extend(f'MAGIC:{entry["id"]}' for entry in get_magic_modes())
+    return modes
 
 def _default_settings():
     return {
@@ -781,17 +808,27 @@ def _get_grain_table(intensity: int) -> np.ndarray:
     return _grain_tables[intensity]
 
 def _apply_grain(arr: np.ndarray, intensity: int) -> np.ndarray:
-    """Apply tiled grain to a uint8 H×W×3 array at any resolution."""
+    """Apply tiled grain without allocating full-frame int16 intermediates."""
     h, w = arr.shape[:2]
     table = _get_grain_table(intensity)
     dy = np.random.randint(0, _GRAIN_TABLE_SIZE)
     dx = np.random.randint(0, _GRAIN_TABLE_SIZE)
-    rows = (np.arange(dy, dy + h) % _GRAIN_TABLE_SIZE)[:, np.newaxis]  # (H,1)
     cols = (np.arange(dx, dx + w) % _GRAIN_TABLE_SIZE)[np.newaxis, :]  # (1,W)
-    grain = table[rows, cols]                                           # (H,W)
-    arr16 = arr.astype(np.int16)
-    arr16 += grain[:, :, np.newaxis]   # broadcast same grain to all channels
-    return np.clip(arr16, 0, 255).astype(np.uint8)
+    # A full 2592-square frame previously needed roughly 95 MB of temporary
+    # arrays here.  On the 512 MB Pi that can push an otherwise-finished Magic
+    # job into swap and trip the hardware watchdog on the following capture.
+    # Process narrow strips in place so peak temporary memory stays below 8 MB.
+    for y0 in range(0, h, 256):
+        y1 = min(y0 + 256, h)
+        rows = (
+            np.arange(dy + y0, dy + y1) % _GRAIN_TABLE_SIZE
+        )[:, np.newaxis]
+        grain = table[rows, cols]
+        strip = arr[y0:y1].astype(np.int16)
+        strip += grain[:, :, np.newaxis]
+        np.clip(strip, 0, 255, out=strip)
+        arr[y0:y1] = strip
+    return arr
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Grain — all filters at 22, Normal has none
@@ -890,10 +927,40 @@ def init_display():
         if cmd == 0x11:
             time.sleep(0.08)
     send_command(0x29)
+_software_dimmed = False
+_SOFTWARE_DIM_ALPHA = max(0, min(255, int(os.getenv(
+    "OPTOCAM_SOFTWARE_DIM_ALPHA", "180",
+))))
+_software_dim_overlays = {}
+
 def set_backlight(state):
+    global _software_dimmed
+    _software_dimmed = False
     _pi.set_PWM_dutycycle(BL_PIN, 255 if state else 0)
+
 def set_backlight_brightness(pct):
-    _pi.set_PWM_dutycycle(BL_PIN, int(pct * 2.55))
+    global _software_dimmed
+    brightness = max(0.0, min(100.0, float(pct)))
+    if WHISPLAY_MODE:
+        # The Whisplay backlight is unstable at intermediate PWM levels on the
+        # Pi Zero 2 W.  Keep it fully on while dimming and darken only the copy
+        # sent to the panel; zero remains a real hardware-off state.
+        _software_dimmed = 0 < brightness < 100
+        _pi.set_PWM_dutycycle(BL_PIN, 255 if brightness > 0 else 0)
+        return
+    _pi.set_PWM_dutycycle(BL_PIN, int(brightness * 2.55))
+
+def _apply_software_dim(image):
+    """Return a dimmed display copy without modifying the source image."""
+    if not _software_dimmed or _SOFTWARE_DIM_ALPHA <= 0:
+        return image
+    size = image.size
+    overlay = _software_dim_overlays.get(size)
+    if overlay is None:
+        overlay = Image.new("RGBA", size, (0, 0, 0, _SOFTWARE_DIM_ALPHA))
+        _software_dim_overlays[size] = overlay
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
 def clear_display():
     if WHISPLAY_MODE:
         _whisplay.clear()
@@ -966,7 +1033,7 @@ def hardware_feedback(kind):
 def display_image(image):
     if WHISPLAY_MODE:
         with display_lock:
-            _whisplay.draw_rgb565(convert_to_rgb565(image))
+            _whisplay.draw_rgb565(convert_to_rgb565(_apply_software_dim(image)))
         return
     with display_lock:
         send_command(0x2A)
@@ -1409,14 +1476,24 @@ def get_gallery_images():
     except Exception as e:
         print(f"Gallery scan error: {e}")
         return []
+
+def fit_gallery_image(img):
+    """Fill the square gallery viewport without changing the photo's aspect ratio."""
+    from PIL import ImageOps
+    return ImageOps.fit(
+        img.convert("RGB"),
+        (240, 240),
+        method=Image.BILINEAR,
+        centering=(0.5, 0.5),
+    )
+
 def display_gallery_image(filepath, index, total, confirm_delete=False):
     """Load and display a gallery image using draft mode for fast decoding"""
     try:
         from PIL import ImageDraw, ImageFilter
         img = Image.open(filepath)
         img.draft("RGB", (240, 240))
-        img = img.convert("RGB")
-        img = img.resize((240, 240), Image.BILINEAR)
+        img = fit_gallery_image(img)
 
         # Counter bottom-left with 15px padding
         font = load_font(25)
@@ -1442,6 +1519,16 @@ def display_gallery_image(filepath, index, total, confirm_delete=False):
             icon_color = ((255, 255, 255, 255) if gallery_audio_is_playing(filepath)
                           else (155, 155, 155, 255))
             _draw_sound_icon(marker_draw, 201, 202, color=icon_color)
+            img = Image.alpha_composite(img.convert("RGBA"), marker).convert("RGB")
+            draw = ImageDraw.Draw(img)
+
+        # Generated photos carry a sidecar and get a compact AI marker.
+        if is_ai_generated(filepath):
+            marker = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+            marker_draw = ImageDraw.Draw(marker)
+            marker_draw.rounded_rectangle((194, 14, 226, 42), radius=8, fill=(0, 0, 0, 150))
+            ai_font = load_font(18)
+            marker_draw.text((200, 17), "AI", font=ai_font, fill=(255, 255, 255, 255))
             img = Image.alpha_composite(img.convert("RGBA"), marker).convert("RGB")
             draw = ImageDraw.Draw(img)
 
@@ -1561,7 +1648,8 @@ def start_gif_gallery_load(filepath, index, total):
         print(f"GIF gallery load error: {e}")
     return frames
 
-def _save_image_async(captured_image, filepath, filename, film_name="No Filter", add_audio=False):
+def _save_image_async(captured_image, filepath, filename, film_name="No Filter", add_audio=False,
+                      magic_mode_id=None):
     """Save and verify image in background — runs after preview has already resumed"""
     global saving_active, audio_prompt_active, audio_prompt_ready, audio_prompt_background
     saved = False
@@ -1603,6 +1691,13 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter",
 
         print(f"✓ Saved {filename} ({file_size/1024/1024:.2f} MB) in {time.time()-start:.2f}s")
         saved = True
+        if magic_mode_id and magic_worker is not None:
+            if magic_worker.enqueue(filepath, magic_mode_id):
+                set_magic_status("AI GENERATING", 2.0)
+                print(f"✨ Magic queued: {magic_mode_id}")
+            else:
+                print(f"✗ Magic mode no longer exists: {magic_mode_id}")
+                hardware_feedback("error")
         if add_audio:
             audio_prompt_background = captured_image.resize((240, 240), Image.BILINEAR).convert("RGB")
             audio_prompt_ready = True
@@ -1611,6 +1706,10 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter",
         print(f"✗ Save error: {e}")
         hardware_feedback("error")
     finally:
+        # Cyclic GC is disabled during the camera loop for steadier preview
+        # timing.  Reclaim completed full-resolution save objects explicitly so
+        # consecutive Magic captures do not accumulate memory pressure.
+        gc.collect()
         if add_audio and not saved:
             audio_prompt_ready = False
         if add_audio:
@@ -1618,7 +1717,7 @@ def _save_image_async(captured_image, filepath, filename, film_name="No Filter",
         with _save_active_lock:
             saving_active -= 1
 
-def capture_full_res(picam2, add_audio=False):
+def capture_full_res(picam2, add_audio=False, magic_mode_id=None):
     """
     Capture full-res image. Camera operations run under lock.
     Preview resumes immediately after camera is free — save happens in background.
@@ -1738,7 +1837,7 @@ def capture_full_res(picam2, add_audio=False):
 
         threading.Thread(
             target=_save_image_async,
-            args=(captured_image, filepath, filename, FILTERS[filter_index], add_audio),
+            args=(captured_image, filepath, filename, FILTERS[filter_index], add_audio, magic_mode_id),
             daemon=True
         ).start()
 
@@ -1987,6 +2086,7 @@ def button_handler():
     global gif_mode, gif_record_requested, gif_mode_label_time, gif_cancel_requested
     global capture_mode, audio_prompt_active, audio_prompt_ready, audio_prompt_background
     global audio_recording, audio_too_short_until
+    global magic_ready_path
 
     last_capture = 0
     last_preview = 0
@@ -2077,6 +2177,11 @@ def button_handler():
                             filepath = gallery_images[gallery_index]
                             try:
                                 os.remove(filepath)
+                                for sidecar_suffix in (".ai.json", ".magic.json"):
+                                    try:
+                                        os.remove(filepath + sidecar_suffix)
+                                    except FileNotFoundError:
+                                        pass
                                 audio_path = paired_audio_path(filepath)
                                 if os.path.exists(audio_path):
                                     os.remove(audio_path)
@@ -2273,7 +2378,9 @@ def button_handler():
                     cap_double_candidate = False
                     if WHISPLAY_MODE and not WHISPLAY_AUDIO_AVAILABLE:
                         refresh_whisplay_audio_devices()
-                    modes = ["PHOTO", "GIF"] + (["MOMENT"] if WHISPLAY_AUDIO_AVAILABLE else [])
+                    modes = available_capture_modes()
+                    if capture_mode not in modes:
+                        capture_mode = "PHOTO"
                     capture_mode = modes[(modes.index(capture_mode) + 1) % len(modes)]
                     gif_mode = capture_mode == "GIF"
                     gif_mode_label_time = now
@@ -2295,6 +2402,17 @@ def button_handler():
                             gallery_index = (gallery_index - 1) % len(gallery_images)
                             hardware_feedback("navigate")
                         gallery_needs_update = True
+                    elif (preview_active and not capturing and not gif_recording
+                          and magic_ready_path and os.path.isfile(magic_ready_path)):
+                        gallery_images = get_gallery_images()
+                        if magic_ready_path in gallery_images:
+                            gallery_index = gallery_images.index(magic_ready_path)
+                            gallery_active = True
+                            preview_active = False
+                            gallery_needs_update = True
+                            magic_ready_path = None
+                            print("AI preview opened")
+                            hardware_feedback("gallery")
                     elif preview_active and not capturing and not gif_recording:
                         awb_mode_index = (awb_mode_index + 1) % len(AWB_MODES)
                         awb_mode_changed = True
@@ -2469,11 +2587,18 @@ saving_active = 0
 _save_active_lock = threading.Lock()
 filter_label_time = 0
 isp_changed = False
-capture_mode = str(_SETTINGS.get("capture_mode") or "").upper()
+_stored_capture_mode = str(_SETTINGS.get("capture_mode") or "")
+capture_mode = (
+    "MAGIC:" + _stored_capture_mode.split(":", 1)[1]
+    if _stored_capture_mode.upper().startswith("MAGIC:")
+    else _stored_capture_mode.upper()
+)
 if capture_mode == "AUDIO":
     capture_mode = "MOMENT"  # migrate the pre-MOMENT development setting
-if capture_mode not in {"PHOTO", "GIF", "MOMENT"}:
+if capture_mode not in {"PHOTO", "GIF", "MOMENT"} and not capture_mode.startswith("MAGIC:"):
     capture_mode = "GIF" if _SETTINGS.get("gif_mode") else "PHOTO"
+if capture_mode.startswith("MAGIC:") and get_magic_mode(capture_mode_magic_id()) is None:
+    capture_mode = "PHOTO"
 gif_mode = capture_mode == "GIF"  # compatibility alias used by the GIF recorder
 gif_record_requested = False  # button thread → main loop: start a recording
 gif_recording = False         # True while record_gif() owns the camera/display
@@ -2503,6 +2628,30 @@ _transfer_dimmed = False
 _idle_last_activity = 0.0
 _idle_dimmed = False
 IDLE_DIM_TIMEOUT = 90.0
+magic_worker = None
+magic_ready_path = None
+magic_ready_notice_time = 0.0
+magic_status_message = None
+magic_status_until = 0.0
+
+def set_magic_status(message, duration):
+    global magic_status_message, magic_status_until
+    magic_status_message = message
+    magic_status_until = time.time() + duration
+
+def _magic_output_name():
+    return f"Optocamzero_{get_next_capture_number()}.jpg"
+
+def _magic_ready(output_path, job):
+    global magic_ready_path, magic_ready_notice_time
+    magic_ready_path = output_path
+    magic_ready_notice_time = time.time()
+    print(f"✨ AI ready: {os.path.basename(output_path)} ({job.get('title', 'Magic')})")
+    hardware_feedback("saved")
+
+def _magic_error(exc, job):
+    print(f"✗ Magic generation retry {job.get('attempts', 0)}: {exc}")
+    set_magic_status("AI RETRYING", 2.0)
 
 def _handle_termination(_signum, _frame):
     global exit_requested
@@ -2525,6 +2674,7 @@ def main():
     global audio_prompt_active, audio_prompt_ready, audio_prompt_background
     global audio_recording, audio_too_short_until
     global _gif_anim_frames, _gif_anim_index, _gif_anim_last, _gif_anim_file
+    global magic_worker
 
     gc.disable()
 
@@ -2557,6 +2707,11 @@ def main():
 
     picam2 = Picamera2()
     config_cache = CameraConfigCache(picam2)
+
+    magic_worker = MagicGenerationWorker(
+        OPTOCAM_HOME, _magic_output_name, on_ready=_magic_ready, on_error=_magic_error
+    )
+    magic_worker.start()
 
     # ALSA may enumerate after this early-start service imports the module.
     # Refresh once the camera/display startup work has given udev time to settle.
@@ -2768,7 +2923,7 @@ def main():
                     capture_dot_time = time.time()
                     threading.Thread(
                         target=capture_full_res,
-                        args=(picam2, capture_mode == "MOMENT"),
+                        args=(picam2, capture_mode == "MOMENT", capture_mode_magic_id()),
                         daemon=True
                     ).start()
 
@@ -2790,10 +2945,21 @@ def main():
                                 if isp_changed:
                                     isp_changed = False
                                     picam2.set_controls(_FILM_ISP[FILTERS[filter_index]])
-                                req = picam2.capture_request()
-                                preview_image = req.make_image("main")
-                                metadata = req.get_metadata()
-                                req.release()
+                                # Do not let a transient CSI/ISP stall block the
+                                # whole UI forever. Picamera2's default call has
+                                # no timeout, while the lower camera stack may
+                                # already have reported a frontend timeout.
+                                frame_job = picam2.capture_request(wait=False)
+                                try:
+                                    req = frame_job.get_result(timeout=2.5)
+                                except TimeoutError:
+                                    frame_job.cancel()
+                                    raise
+                                try:
+                                    preview_image = req.make_image("main")
+                                    metadata = req.get_metadata()
+                                finally:
+                                    req.release()
                                 preview_image = preview_image.transpose(Image.ROTATE_90)
                                 if first_preview_frame_pending and cold_start_pending:
                                     # Genuine cold start only: show one unfiltered
@@ -2889,6 +3055,15 @@ def main():
                                     centre_msg_start, centre_msg_dur = no_space_message_time, 1.0
                                 elif centre_msg is None and no_space_message_time > 0:
                                     no_space_message_time = 0
+                                if (centre_msg is None and magic_ready_path
+                                        and os.path.isfile(magic_ready_path)):
+                                    centre_msg = "AI READY - 2X"
+                                    centre_msg_start, centre_msg_dur = magic_ready_notice_time, 86400.0
+                                elif (centre_msg is None and magic_status_message
+                                      and time.time() < magic_status_until):
+                                    centre_msg = magic_status_message
+                                    centre_msg_start = magic_status_until - 2.0
+                                    centre_msg_dur = 2.0
                                 if (centre_msg is None and filter_label_time > 0
                                         and time.time() - filter_label_time < 1.5
                                         and gallery_empty_message_time == 0
@@ -2901,7 +3076,7 @@ def main():
                                         and time.time() - gif_mode_label_time < 1.5):
                                     centre_msg = (
                                         "MOMENT Mode" if capture_mode == "MOMENT"
-                                        else f"{capture_mode.title()} Mode"
+                                        else f"{capture_mode_label().title()} Mode"
                                     )
                                     centre_msg_start, centre_msg_dur = gif_mode_label_time, 1.5
                                 elif centre_msg is None and gif_mode_label_time > 0:
@@ -2919,8 +3094,9 @@ def main():
                                 # affects it changed; otherwise rebuild and cache it.
                                 # (The centre label and a popping pill are NOT in here —
                                 # they're animated on top below, so they never invalidate it.)
+                                active_mode_label = capture_mode_label()
                                 hud_key = (awb_label, battery_val, iso_val, shutter_val,
-                                           FILTERS[filter_index], capture_mode, gif_phase_mod,
+                                           FILTERS[filter_index], capture_mode, active_mode_label, gif_phase_mod,
                                            pill_popping, awb_popping)
                                 if _hud_overlay_cache["key"] == hud_key:
                                     overlay = _hud_overlay_cache["img"]
@@ -2943,7 +3119,7 @@ def main():
                                         overlay = Image.alpha_composite(overlay, get_filter_indicator(FILTERS[filter_index]))
                                     if capture_mode != "PHOTO":
                                         overlay = Image.alpha_composite(
-                                            overlay, get_capture_mode_indicator(capture_mode, gif_phase_mod))
+                                            overlay, get_capture_mode_indicator(active_mode_label, gif_phase_mod))
                                     _hud_overlay_cache["key"] = hud_key
                                     _hud_overlay_cache["img"] = overlay
 
@@ -3000,6 +3176,18 @@ def main():
                                     print(f"📊 {fps:.1f} fps")
                                     frame_count = 0
                                     last_fps_report = time.time()
+                    except TimeoutError:
+                        print("Preview frame timed out; restarting camera pipeline")
+                        with camera_lock:
+                            try:
+                                picam2.stop()
+                            except Exception as stop_error:
+                                print(f"Preview recovery stop error: {stop_error}")
+                            camera_started = False
+                            first_preview_frame_pending = True
+                            isp_changed = True
+                            awb_mode_changed = True
+                        time.sleep(0.5)
                     except Exception as e:
                         print(f"Preview error: {e}")
                         time.sleep(0.1)
@@ -3024,6 +3212,8 @@ def main():
         exit_requested = True
 
     finally:
+        if magic_worker is not None:
+            magic_worker.stop()
         if audio_recording:
             finish_audio_recording()
         stop_gallery_audio()

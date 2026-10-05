@@ -61,11 +61,39 @@ The installer also enables a web gallery on port 80. Open
 runs independently of the camera UI and remains available in both startup
 modes.
 
+## Magic modes
+
+Magic modes follow the asynchronous ImageGenCam flow: the camera saves the
+original photo first, queues an image-edit request, and immediately returns to
+the live preview. The generated JPG is added to the same album with an **AI**
+badge. When it is ready, the camera shows `AI READY - 2X`; double-click
+the Whisplay button to open that result.
+
+Before installing, or afterwards in `~/optocamzero-whisplay/.env`, set:
+
+```sh
+OPENAI_API_KEY=your_api_key_here
+OPTOCAM_MAGIC_PROXY=http://proxy.example:7890
+```
+
+Both values can also be updated from the web **MAGIC** panel. A saved API key
+is shown only in masked form; leaving the field blank keeps it unchanged, and
+clearing it requires the explicit checkbox. The key stays on the camera and is
+never returned to the browser or exposed by the gallery. The default
+model is `chatgpt-image-latest`; it can be overridden with
+`OPTOCAM_MAGIC_MODEL`. Image generation requires internet access and uses the
+API account associated with the key.
+
+Open the web gallery and choose **MAGIC** to add, edit, or remove modes. A
+`Cheese` example is created automatically. Each saved mode appears in the
+device's capture-mode cycle the next time the Whisplay button is held. Failed
+jobs remain in `magic_queue/` and retry after network or service recovery.
+
 ## Controls
 
 | Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
 | --- | --- | --- | --- | --- | --- | --- |
-| Preview | Take photo / record GIF | Next white balance | Cycle Photo/GIF/Moment¹ | Next filter | Open gallery | Home (daemon) / preview on-off (standalone) |
+| Preview | Take photo / record GIF / run Magic | Preview ready AI result, otherwise next white balance | Cycle Photo/GIF/Moment¹/Magic modes | Next filter | Open gallery | Home (daemon) / preview on-off (standalone) |
 | GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
 | Moment recording | Hold to record, release to save | — | — | — | — | Home (daemon) |
 | Gallery | Close gallery | Previous item | — | Next item | Delete / confirm delete | Home (daemon) |
