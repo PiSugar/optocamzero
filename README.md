@@ -1,6 +1,9 @@
-# Optocam Zero
+# Whisplay Optocam Zero
 
-Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off the shelf components. 
+Whisplay Optocam Zero is an open-source, compact DIY digital camera for the
+Raspberry Pi Zero and Raspberry Pi Zero 2 W. It supports the Whisplay HAT,
+PiSugar 3, and Raspberry Pi Camera Module 3, while retaining the original
+Optocam Zero hardware design and Buildroot image.
 
 I designed Optocam Zero to have a very compact, carry everywhere and have fun sort of camera. As I was inspired by Kodak charmera and similar toy cameras, I wanted it to be feel playful, enjoyable and be intuitive to use. I also aimed to make it relatively easy to build so that others can also build one and have fun with it. That's why all the case parts are easily printable and for the electronics it uses off the shelf components that are easy to find.
 
