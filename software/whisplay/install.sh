@@ -128,7 +128,7 @@ systemctl enable --now optocamzero.service
 echo
 echo "Optocam Zero is installed in $MODE mode and enabled at boot."
 if [ "$MODE" = daemon ]; then
-    echo "PiSugar single-click returns to the Whisplay desktop."
+    echo "The PiSugar power button returns to the Whisplay desktop."
 else
     echo "whisplay-daemon is disabled; Optocam owns the HAT directly."
 fi

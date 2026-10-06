@@ -2737,7 +2737,8 @@ def main():
         print("✓ PiSugar double click: Next filter / Next gallery item")
         print("✓ PiSugar hold: Open gallery / Delete")
         if _whisplay.mode == "daemon":
-            print("✓ PiSugar single click: Return to Whisplay desktop")
+            print("✓ PiSugar power button: Return to Whisplay desktop")
+            print("✓ PiSugar custom-button single click: Unassigned")
         else:
             print("✓ Standalone boot service: Direct hardware ownership")
     else:

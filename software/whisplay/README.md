@@ -29,9 +29,9 @@ sudo bash software/whisplay/install.sh --mode daemon
 ```
 
 This registers **Optocam Zero**, installs `optocamzero.service`, and launches it
-through `whisplay-daemon` at every boot. PiSugar single-click returns to the
-desktop. To open it again without rebooting, select Optocam on the desktop and
-hold the HAT button, or run:
+through `whisplay-daemon` at every boot. Pressing the PiSugar power button
+returns to the desktop. To open it again without rebooting, select Optocam on
+the desktop and hold the HAT button, or run:
 
 ```sh
 sudo systemctl start optocamzero.service
@@ -39,8 +39,8 @@ sudo systemctl start optocamzero.service
 
 This version requires a Whisplay daemon that supports
 `exit_gesture=none`. This disables quadruple-click exit for Optocam so Whisplay
-click, double-click, and hold remain available to the camera. PiSugar
-single-click remains Home.
+click, double-click, and hold remain available to the camera. The PiSugar power
+button remains Home; a custom-button single-click is ignored in daemon mode.
 
 For a dedicated camera without `whisplay-daemon`, run:
 
@@ -92,26 +92,28 @@ jobs remain in `magic_queue/` and retry after network or service recovery.
 
 ## Controls
 
-| Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
-| --- | --- | --- | --- | --- | --- | --- |
-| Preview | Take photo / record GIF / run Magic | Preview ready AI result, otherwise next white balance | Cycle Photo/GIF/Moment¹/Magic modes | Next filter | Open gallery | Home (daemon) / preview on-off (standalone) |
-| GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
-| Moment recording | Hold to record, release to save | — | — | — | — | Home (daemon) |
-| Gallery | Close gallery | Previous item | — | Next item | Delete / confirm delete | Home (daemon) |
+| Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar custom double-click | PiSugar custom hold, then release | PiSugar custom click | PiSugar power button |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Preview | Take photo / record GIF / run Magic | Preview ready AI result, otherwise next white balance | Cycle Photo/GIF/Moment¹/Magic modes | Next filter | Open gallery | — (daemon) / preview on-off (standalone) | Home (daemon) |
+| GIF recording | Cancel recording | — | — | — | — | — | Home (daemon) |
+| Moment recording | Hold to record, release to save | — | — | — | — | — | Home (daemon) |
+| Gallery | Close gallery | Previous item | — | Next item | Delete / confirm delete | — | Home (daemon) |
 
 ¹ Moment mode appears only when the ALSA capture device identifies itself as
 `whisplay-sound`. After the photo is taken, hold the Whisplay button to record
 up to 10 seconds. Recordings shorter than one second are discarded. The photo
 and WAV file share the same capture number and are managed as a pair.
 
-In daemon mode, PiSugar single-click remains owned by `whisplay-daemon` as the
-system Home gesture. In standalone mode there is no desktop, so stop/restart the
-camera with `systemctl`. Optocam only subscribes to the TCP event stream: it
-does not read or change `button_shell`, `button_enable`, or `anti_mistouch`, so
+In daemon mode, the PiSugar power button is the system Home control. A
+custom-button single-click is ignored; double-click and long-press remain
+available to Optocam through the TCP event stream. In standalone mode there is
+no desktop, and a custom-button single-click toggles the preview. Optocam does
+not read or change `button_shell`, `button_enable`, or `anti_mistouch`, so
 existing PiSugar custom actions remain untouched. PiSugar reports a long press
-only after the button is released, so its gallery or deletion action also runs
-on release. Whisplay single-click waits for a 350 ms double-click window before
-firing the shutter, preventing an AWB double-click from taking a photo first.
+only after the custom button is released, so its gallery or deletion action
+also runs on release. Whisplay single-click waits for a 350 ms double-click
+window before firing the shutter, preventing an AWB double-click from taking a
+photo first.
 
 ## Screen and LED feedback
 

@@ -4,8 +4,9 @@
 > [Whisplay port and installer](whisplay/README.md) instead of the Buildroot
 > image described below. Its controls are different: Whisplay click is the
 > shutter, double-click changes white balance, and hold changes Photo/GIF mode;
-> PiSugar handles filters, gallery actions, and Home. The joystick, hotspot and
-> other controls documented below apply only to the original hardware version.
+> the PiSugar custom button handles filters and gallery actions, while the
+> PiSugar power button returns Home. The joystick, hotspot and other controls
+> documented below apply only to the original hardware version.
 
 <br>
 

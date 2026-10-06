@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Whisplay HAT and PiSugar 3 adapter for Optocam Zero.
+"""Whisplay HAT and PiSugar 3 Air adapter for Optocam Zero.
 
 With whisplay-daemon running, hardware is accessed exclusively through its IPC
 API.  A standalone backend is also available for dedicated-camera images where
@@ -226,7 +226,7 @@ class WhisplayBackend:
                     "OPTOCAM_HOME": self.home,
                     "OPTOCAM_WHISPLAY_BACKEND": "daemon",
                 },
-                # PiSugar single click is the only Home gesture. Whisplay click,
+                # The PiSugar power button is Home. Whisplay click,
                 # double-click and hold all belong to the camera UI.
                 "exit_gesture": "none",
                 "priority": 50,
@@ -355,7 +355,7 @@ class WhisplayBackend:
                             self.request_exit(name)
                             self.gpio.set_pressed(self.capture_pin, False)
                             if name == "app_focus_revoked":
-                                # PiSugar Home revokes immediately, before the
+                                # PiSugar power-button Home revokes immediately, before the
                                 # app's normal cleanup can release focus. Undo a
                                 # possible idle dim so the desktop stays visible.
                                 self.set_backlight(100)
@@ -435,8 +435,8 @@ class WhisplayBackend:
                                 if usable:
                                     print(f"PiSugar {event_name} gesture")
                                     self.gpio.handle_pisugar_event(event_name)
-                                # In daemon mode `single` remains the Home event;
-                                # standalone mode uses it as preview on/off.
+                                # A custom-button `single` is ignored in daemon
+                                # mode; standalone uses it as preview on/off.
                         except socket.timeout:
                             pass
                         if time.monotonic() >= next_battery_poll:

@@ -68,31 +68,32 @@ installation modes.
 
 ### Interaction changes
 
-The Whisplay HAT has only one camera button, while in daemon mode the PiSugar
-button's single click remains the desktop Home action. The original joystick
-controls are therefore remapped as follows:
+The Whisplay HAT has one camera button. On PiSugar 3 Air, the custom button
+handles filter and gallery gestures, while the power button returns to the
+Whisplay desktop in daemon mode. The original joystick controls are remapped as
+follows:
 
-| Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar double-click | PiSugar hold, then release | PiSugar click |
-| --- | --- | --- | --- | --- | --- | --- |
-| Camera preview | Take a photo or start GIF capture | Select next white balance | Cycle Photo/GIF/Moment¹ | Select next filter | Open on-device gallery | Home (daemon) / toggle preview (standalone) |
-| GIF recording | Cancel recording | — | — | — | — | Home (daemon) |
-| Moment recording | Hold to record, release to save | — | — | — | — | Home (daemon) |
-| Gallery | Return to camera preview | Show previous item | — | Show next item | Delete / confirm deletion | Home (daemon) |
+| Context | Whisplay click | Whisplay double-click | Whisplay hold | PiSugar custom double-click | PiSugar custom hold, then release | PiSugar custom click | PiSugar power button |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Camera preview | Take a photo or start GIF capture | Select next white balance | Cycle Photo/GIF/Moment¹ | Select next filter | Open on-device gallery | — (daemon) / toggle preview (standalone) | Home (daemon) |
+| GIF recording | Cancel recording | — | — | — | — | — | Home (daemon) |
+| Moment recording | Hold to record, release to save | — | — | — | — | — | Home (daemon) |
+| Gallery | Return to camera preview | Show previous item | — | Show next item | Delete / confirm deletion | — | Home (daemon) |
 
 ¹ Moment mode is available on Whisplay hardware only when the detected ALSA
 card is `whisplay-sound`. Recordings are capped at 10 seconds and discarded
 when shorter than one second.
 
-PiSugar long-press events are reported only after the button is released, so
+PiSugar custom-button long-press events are reported only after the button is released, so
 the corresponding gallery action occurs on release. Optocam listens for
-PiSugar double-click and long-press events through the persistent TCP service
+custom-button double-click and long-press events through the persistent TCP service
 on `127.0.0.1:8423`; it does not inject commands into `button_shell` or change
 the user's PiSugar button configuration.
 
 Whisplay single-click is resolved after a short 350 ms double-click window so
 that a double-click never takes an unintended photo. The daemon's Whisplay
-quadruple-click exit gesture is disabled for Optocam; in daemon mode PiSugar
-single-click is the only Home action.
+quadruple-click exit gesture is disabled for Optocam. In daemon mode, the
+PiSugar power button is the Home action.
 
 Other differences from the original interface:
 
