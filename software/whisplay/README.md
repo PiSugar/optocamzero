@@ -5,6 +5,7 @@ This port targets the following hardware combination:
 - Raspberry Pi Zero 2 W
 - Whisplay HAT (240×280 LCD and one button)
 - PiSugar 3 Air
+- 14500 1000 mAh Li-ion battery
 - Raspberry Pi Camera Module 3 (`imx708`, autofocus)
 - Compatible microSD card and the Camera Module ribbon cable for Pi Zero
 - [3D-printable enclosure for this hardware combination](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam)
