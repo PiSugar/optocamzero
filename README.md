@@ -2,8 +2,12 @@
 
 Whisplay Optocam Zero is an open-source, compact DIY digital camera for the
 Raspberry Pi Zero and Raspberry Pi Zero 2 W. It supports the Whisplay HAT,
-PiSugar 3, and Raspberry Pi Camera Module 3, while retaining the original
+PiSugar 3 Air, and Raspberry Pi Camera Module 3, while retaining the original
 Optocam Zero hardware design and Buildroot image.
+
+This project was originally forked from
+[dorukkumkumoglu/optocamzero](https://github.com/dorukkumkumoglu/optocamzero)
+and extends the original project with Whisplay HAT and PiSugar 3 Air support.
 
 I designed Optocam Zero to have a very compact, carry everywhere and have fun sort of camera. As I was inspired by Kodak charmera and similar toy cameras, I wanted it to be feel playful, enjoyable and be intuitive to use. I also aimed to make it relatively easy to build so that others can also build one and have fun with it. That's why all the case parts are easily printable and for the electronics it uses off the shelf components that are easy to find.
 
@@ -38,7 +42,7 @@ I designed Optocam Zero to have a very compact, carry everywhere and have fun so
   
 <br>
 
-## Whisplay HAT + PiSugar 3 Version
+## Whisplay HAT + PiSugar 3 Air Version
 
 This repository also contains a Raspberry Pi OS port for a different hardware
 combination. This version does **not** use the original 240×240 LCD, joystick,
@@ -49,7 +53,7 @@ the standard build guide.
 
 - Raspberry Pi Zero 2 W.
 - Whisplay HAT with its 240×280 LCD, RGB LED, and single button.
-- PiSugar 3 power board with its programmable button.
+- PiSugar 3 Air power board with its programmable button.
 - Raspberry Pi Camera Module 3 (`imx708`) with autofocus.
 - A compatible microSD card and the correct camera ribbon cable for Pi Zero.
 

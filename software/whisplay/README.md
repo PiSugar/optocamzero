@@ -1,10 +1,10 @@
-# Whisplay HAT + PiSugar 3 port
+# Whisplay HAT + PiSugar 3 Air port
 
 This port targets the following hardware combination:
 
 - Raspberry Pi Zero 2 W
 - Whisplay HAT (240×280 LCD and one button)
-- PiSugar 3
+- PiSugar 3 Air
 - Raspberry Pi Camera Module 3 (`imx708`, autofocus)
 - Compatible microSD card and the Camera Module ribbon cable for Pi Zero
 
