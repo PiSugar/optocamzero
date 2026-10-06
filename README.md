@@ -128,23 +128,26 @@ Other differences from the original interface:
 
 ## Build the Camera
 
-The [hardware](hardware/) directory contains the printable files, bill of
-materials, CAD model, and step-by-step guide for the original Optocam Zero
-build. The Whisplay HAT and PiSugar 3 Air version uses its own
+The Whisplay HAT and PiSugar 3 Air version uses its own
 [3D-printable enclosure](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam)
 and the [Whisplay installation guide](software/whisplay/README.md).
 
+The files under [hardware](hardware/) belong to the upstream **original
+Optocam Zero design**. They are retained for reference and are not the hardware
+design for the Whisplay HAT + PiSugar 3 Air version.
+
 <br>
 
-## Hardware
+## Original Optocam Zero Hardware (Upstream)
 
-See the [hardware](hardware/) folder for:
+> **Important:** Every item below is for the original Optocam Zero hardware,
+> not the Whisplay HAT + PiSugar 3 Air build.
 
-- [Bill of materials](hardware/BOM.md).
-- [Build guide](hardware/optocamzero-build-guide.pdf) (PDF).
-- [Bambu Studio project files](hardware/print-ready/) ready to print for transparent PETG or PETG / PETG-CF.
-- [Individual .stls](hardware/stls/) for camera parts.
-- [CAD file](hardware/cad/optocamzero_V1.0.step) for customization.
+- [Original bill of materials](hardware/BOM.md).
+- [Original build guide](hardware/optocamzero-build-guide.pdf) (PDF).
+- [Original Bambu Studio project files](hardware/print-ready/) for transparent PETG or PETG / PETG-CF.
+- [Original STL files](hardware/stls/) for camera parts.
+- [Original CAD model](hardware/cad/optocamzero_V1.0.step) for customization.
 
 
 <br>

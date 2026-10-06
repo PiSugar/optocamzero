@@ -1,6 +1,11 @@
 # Optocam Zero V1.0 Bill of Materials
 Doruk Kumkumoğlu 2026
 
+> **Important:** This BOM is for the upstream original Optocam Zero V1.0
+> hardware. It is **not** the BOM for the Whisplay HAT + PiSugar 3 Air version.
+> The current Whisplay enclosure is maintained in
+> [PiSugar/suit-cases](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam).
+
 <br>
 
 ## Electronics
