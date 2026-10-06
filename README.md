@@ -1,51 +1,53 @@
 # Whisplay Optocam Zero
 
-Whisplay Optocam Zero is an open-source, compact DIY digital camera for the
-Raspberry Pi Zero and Raspberry Pi Zero 2 W. It supports the Whisplay HAT,
-PiSugar 3 Air, and Raspberry Pi Camera Module 3, while retaining the original
-Optocam Zero hardware design and Buildroot image.
+Whisplay Optocam Zero is an open-source, pocket-sized DIY digital camera for
+the Raspberry Pi Zero family.
 
-This project was originally forked from
-[dorukkumkumoglu/optocamzero](https://github.com/dorukkumkumoglu/optocamzero)
-and extends the original project with Whisplay HAT and PiSugar 3 Air support.
+This repository was originally forked from
+[Doruk Kumkumoğlu's Optocam Zero](https://github.com/dorukkumkumoglu/optocamzero)
+and is now developed as an independent continuation. It preserves the original
+3D-printable hardware design and Buildroot firmware while adding a Raspberry Pi
+OS port for the Whisplay HAT, PiSugar 3 Air, and Raspberry Pi Camera Module 3.
 
-I designed Optocam Zero to have a very compact, carry everywhere and have fun sort of camera. As I was inspired by Kodak charmera and similar toy cameras, I wanted it to be feel playful, enjoyable and be intuitive to use. I also aimed to make it relatively easy to build so that others can also build one and have fun with it. That's why all the case parts are easily printable and for the electronics it uses off the shelf components that are easy to find.
+Inspired by the Kodak Charmera and other toy cameras, the project emphasizes a
+playful, intuitive shooting experience. The enclosure is fully printable and
+the electronics use readily available, off-the-shelf components.
 
-![exploded view](assets/DSCG1663.jpg)
+![Whisplay Optocam Zero finished build](assets/whisplay-optocamzero.webp)
 
 ## Features
-- **NEW** - GIF recording and playback.
-- **NEW** - Custom filter maker (up to 5) in hotspot interface.
+- GIF recording and playback.
+- Custom filter maker for up to five presets in the hotspot interface.
 - Very compact and easy to carry in your pocket.
 - Intuitive and simple camera interface and controls.
 - Uses autofocus camera module.
 - 8 photo filters included.
-- Easy and fast image transfer through hotspot interface. Optimized both for mobile and desktop.
+- Fast image transfer through a hotspot interface optimized for mobile and desktop.
 - Screen dimming when inactive to preserve battery.
 - USB-C charging. Device can be used while charging.
-- Interchangable battery.
-- Off the shelf/ common components for the electronics.
-- Fully 3D printed case parts (apart from fasteners).
-- 3D printable TPU protective sleeve and lanyard design is available.
+- Interchangeable battery.
+- Common, off-the-shelf electronic components.
+- Fully 3D-printed enclosure apart from the fasteners.
+- Printable TPU protective sleeve and lanyard.
 
 
 <br>
 
 ## Specs
-- **UPDATE** - Now boots in 5 seconds with the buildroot image.
-- **UPDATE** - Consistent 25-30 fps camera preview on the screen.
-- 2592x2592px Jpeg image capture. Image saves in the background while preview stays active.
-- 240x240px 1.4 inch lcd display.
-- Uses 14500 type li-ion battery.
+- Boots in approximately 5 seconds with the Buildroot image.
+- Consistent 25–30 fps on-screen camera preview.
+- 2592×2592 JPEG capture with background saving.
+- 1.4-inch 240×240 LCD.
+- 14500 Li-ion battery.
 - 70–80 minutes of use per charge.
 - Dimensions: 51×71×18mm (excluding camera and screen bump)
   
 <br>
 
-## Whisplay HAT + PiSugar 3 Air Version
+## Whisplay HAT + PiSugar 3 Air Port
 
-This repository also contains a Raspberry Pi OS port for a different hardware
-combination. This version does **not** use the original 240×240 LCD, joystick,
+The Whisplay port runs on Raspberry Pi OS and targets a different hardware
+combination. It does **not** use the original 240×240 LCD, joystick,
 shutter electronics, removable 14500 battery, or Buildroot image described in
 the standard build guide.
 
@@ -122,14 +124,12 @@ Other differences from the original interface:
 <br>
 
 
-## How to Build Optocam Zero?
+## Build the Camera
 
-Everything you need to build an Optocam Zero yourself is included in this repo.
-
-All the 3d print files, Required parts list, and detailed step by step build guide can be found under the [hardware](hardware/) folder.
-
-If you're considering building one, check the [BOM](hardware/BOM.md) to get an idea of the cost for required tools and parts.
-Also, have a look at the [build guide](hardware/optocamzero-build-guide.pdf), it will give you a clear idea of what the build involves.
+The [hardware](hardware/) directory contains the printable files, bill of
+materials, CAD model, and step-by-step guide for the original Optocam Zero
+build. For the Whisplay HAT and PiSugar 3 Air version, follow the
+[Whisplay installation guide](software/whisplay/README.md).
 
 <br>
 
