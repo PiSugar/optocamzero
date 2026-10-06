@@ -58,6 +58,7 @@ the standard build guide.
 - PiSugar 3 Air power board with its programmable button.
 - Raspberry Pi Camera Module 3 (`imx708`) with autofocus.
 - A compatible microSD card and the correct camera ribbon cable for Pi Zero.
+- [3D-printable Whisplay + PiSugar 3 Air enclosure files](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam).
 
 The normal Whisplay desktop image can run the camera through
 `whisplay-daemon`. A dedicated installation without the daemon is also
@@ -128,8 +129,9 @@ Other differences from the original interface:
 
 The [hardware](hardware/) directory contains the printable files, bill of
 materials, CAD model, and step-by-step guide for the original Optocam Zero
-build. For the Whisplay HAT and PiSugar 3 Air version, follow the
-[Whisplay installation guide](software/whisplay/README.md).
+build. The Whisplay HAT and PiSugar 3 Air version uses its own
+[3D-printable enclosure](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam)
+and the [Whisplay installation guide](software/whisplay/README.md).
 
 <br>
 
