@@ -31,7 +31,7 @@ the electronics use readily available, off-the-shelf components.
 - **Display:** Whisplay HAT with a 240×280 LCD, RGB LED, and camera button.
 - **Power and controls:** PiSugar 3 Air with battery monitoring, custom button,
   and power-button Home control in daemon mode.
-- **Battery:** 14500 1000 mAh Li-ion cell.
+- **Battery:** 14500 1000 mAh Li-ion cell with leads and a PH2.0 connector.
 - **Camera:** Raspberry Pi Camera Module 3 (`imx708`) with continuous autofocus.
 - **Still images:** 2592×2592 JPEG with background saving.
 - **Animated GIFs:** 640×640 capture stream.
@@ -55,7 +55,7 @@ the standard build guide.
 - Raspberry Pi Zero 2 W.
 - Whisplay HAT with its 240×280 LCD, RGB LED, and single button.
 - PiSugar 3 Air power board with its programmable button.
-- 14500 1000 mAh Li-ion battery.
+- 14500 1000 mAh Li-ion battery with leads and a PH2.0 connector.
 - Raspberry Pi Camera Module 3 (`imx708`) with autofocus.
 - A compatible microSD card and the correct camera ribbon cable for Pi Zero.
 - [3D-printable Whisplay + PiSugar 3 Air enclosure files](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam).
