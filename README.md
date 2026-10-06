@@ -16,32 +16,30 @@ the electronics use readily available, off-the-shelf components.
 ![Whisplay Optocam Zero finished build](assets/whisplay-optocamzero.webp)
 
 ## Features
-- GIF recording and playback.
-- Custom filter maker for up to five presets in the hotspot interface.
-- Very compact and easy to carry in your pocket.
-- Intuitive and simple camera interface and controls.
-- Uses autofocus camera module.
-- 8 photo filters included.
-- Fast image transfer through a hotspot interface optimized for mobile and desktop.
-- Screen dimming when inactive to preserve battery.
-- USB-C charging. Device can be used while charging.
-- Interchangeable battery.
-- Common, off-the-shelf electronic components.
-- Fully 3D-printed enclosure apart from the fasteners.
-- Printable TPU protective sleeve and lanyard.
+- Photo, animated GIF, Moment audio, and configurable Magic capture modes.
+- Autofocus still capture with eight built-in filters and up to five custom presets.
+- Full-screen Whisplay preview with HUD, battery level, and RGB LED feedback.
+- On-device gallery plus a mobile- and desktop-friendly web gallery.
+- Raspberry Pi OS support in both `whisplay-daemon` and standalone modes.
+- Dedicated 3D-printable enclosure for the Whisplay HAT and PiSugar 3 Air.
 
 
 <br>
 
 ## Specs
-- Boots in approximately 5 seconds with the Buildroot image.
-- Consistent 25–30 fps on-screen camera preview.
-- 2592×2592 JPEG capture with background saving.
-- 1.4-inch 240×240 LCD.
-- 14500 Li-ion battery.
-- 70–80 minutes of use per charge.
-- Dimensions: 51×71×18mm (excluding camera and screen bump)
-  
+- **Computer:** Raspberry Pi Zero 2 W.
+- **Display:** Whisplay HAT with a 240×280 LCD, RGB LED, and camera button.
+- **Power and controls:** PiSugar 3 Air with battery monitoring, custom button,
+  and power-button Home control in daemon mode.
+- **Camera:** Raspberry Pi Camera Module 3 (`imx708`) with continuous autofocus.
+- **Still images:** 2592×2592 JPEG with background saving.
+- **Animated GIFs:** 640×640 capture stream.
+- **Audio:** up to 10-second Moment recordings when `whisplay-sound` is available.
+- **Software:** Raspberry Pi OS, with daemon and standalone deployment modes.
+- **Storage and access:** captures stored on microSD and available through the
+  on-device gallery or web gallery on port 80.
+- **Enclosure:** [PiSugar 3 Air + Whisplay Optocam printable files](https://github.com/PiSugar/suit-cases/tree/main/pisugar3air-whisplay-optocam).
+
 <br>
 
 ## Whisplay HAT + PiSugar 3 Air Port
