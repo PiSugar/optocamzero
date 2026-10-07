@@ -2631,6 +2631,7 @@ IDLE_DIM_TIMEOUT = 90.0
 magic_worker = None
 magic_ready_path = None
 magic_ready_notice_time = 0.0
+MAGIC_READY_NOTICE_SECONDS = 10.0
 magic_status_message = None
 magic_status_until = 0.0
 
@@ -2650,8 +2651,10 @@ def _magic_ready(output_path, job):
     hardware_feedback("saved")
 
 def _magic_error(exc, job):
-    print(f"✗ Magic generation retry {job.get('attempts', 0)}: {exc}")
-    set_magic_status("AI RETRYING", 2.0)
+    failed = job.get("status") == "failed"
+    action = "failed" if failed else "retry"
+    print(f"✗ Magic generation {action} {job.get('attempts', 0)}: {exc}")
+    set_magic_status("AI FAILED" if failed else "AI RETRYING", 2.0)
 
 def _handle_termination(_signum, _frame):
     global exit_requested
@@ -3057,9 +3060,12 @@ def main():
                                 elif centre_msg is None and no_space_message_time > 0:
                                     no_space_message_time = 0
                                 if (centre_msg is None and magic_ready_path
-                                        and os.path.isfile(magic_ready_path)):
+                                        and os.path.isfile(magic_ready_path)
+                                        and time.time() - magic_ready_notice_time
+                                            < MAGIC_READY_NOTICE_SECONDS):
                                     centre_msg = "AI READY - 2X"
-                                    centre_msg_start, centre_msg_dur = magic_ready_notice_time, 86400.0
+                                    centre_msg_start = magic_ready_notice_time
+                                    centre_msg_dur = MAGIC_READY_NOTICE_SECONDS
                                 elif (centre_msg is None and magic_status_message
                                       and time.time() < magic_status_until):
                                     centre_msg = magic_status_message

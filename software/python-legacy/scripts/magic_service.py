@@ -25,6 +25,9 @@ DEFAULT_MAGIC_MODES = [
 ]
 TITLE_MAX = 18
 PROMPT_MAX = 2000
+SOURCE_IMAGE_SIZE = 512
+SOURCE_JPEG_QUALITY = 95
+MAX_AUTO_ATTEMPTS = 3
 
 
 def read_env_file(path: str | Path) -> dict[str, str]:
@@ -196,7 +199,19 @@ class OpenAIImageEditor:
             or os.getenv("OPTOCAM_MAGIC_MODEL", "chatgpt-image-latest")
         ).strip()
         self.quality = str(
-            config.get("OPTOCAM_MAGIC_QUALITY") or os.getenv("OPTOCAM_MAGIC_QUALITY", "low")
+            config.get("OPTOCAM_MAGIC_QUALITY")
+            or os.getenv("OPTOCAM_MAGIC_QUALITY")
+            or "high"
+        ).strip()
+        self.input_fidelity = str(
+            config.get("OPTOCAM_MAGIC_INPUT_FIDELITY")
+            or os.getenv("OPTOCAM_MAGIC_INPUT_FIDELITY")
+            or "high"
+        ).strip()
+        self.output_compression = str(
+            config.get("OPTOCAM_MAGIC_OUTPUT_COMPRESSION")
+            or os.getenv("OPTOCAM_MAGIC_OUTPUT_COMPRESSION")
+            or "95"
         ).strip()
         self.size = str(
             config.get("OPTOCAM_MAGIC_SIZE") or os.getenv("OPTOCAM_MAGIC_SIZE") or "1024x1024"
@@ -216,16 +231,16 @@ class OpenAIImageEditor:
         with Image.open(image_path) as image:
             # JPEG draft decoding avoids expanding the 2592-square camera file
             # at full resolution just to reduce it for the API request.
-            image.draft("RGB", (512, 512))
+            image.draft("RGB", (SOURCE_IMAGE_SIZE, SOURCE_IMAGE_SIZE))
             image = ImageOps.exif_transpose(image).convert("RGB")
             image = ImageOps.fit(
                 image,
-                (512, 512),
+                (SOURCE_IMAGE_SIZE, SOURCE_IMAGE_SIZE),
                 method=Image.LANCZOS,
                 centering=(0.5, 0.5),
             )
             output = io.BytesIO()
-            image.save(output, "JPEG", quality=88, optimize=True)
+            image.save(output, "JPEG", quality=SOURCE_JPEG_QUALITY, optimize=True)
             return output.getvalue()
 
     @staticmethod
@@ -247,10 +262,7 @@ class OpenAIImageEditor:
         ])
         return b"".join(chunks)
 
-    def edit(self, source_path: Path, prompt: str) -> bytes:
-        if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-        boundary = "----optocam-" + uuid.uuid4().hex
+    def _request_fields(self, prompt: str) -> dict[str, str]:
         fields = {
             "model": self.model,
             "prompt": (
@@ -260,10 +272,17 @@ class OpenAIImageEditor:
             "quality": self.quality,
             "size": self.size,
             "output_format": "jpeg",
-            "output_compression": "88",
+            "output_compression": self.output_compression,
         }
         if self.model not in {"gpt-image-2", "gpt-image-2-2026-04-21"}:
-            fields["input_fidelity"] = "low"
+            fields["input_fidelity"] = self.input_fidelity
+        return fields
+
+    def edit(self, source_path: Path, prompt: str) -> bytes:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        boundary = "----optocam-" + uuid.uuid4().hex
+        fields = self._request_fields(prompt)
         body = self._multipart(fields, source_path, boundary)
         api_request = request.Request(
             "https://api.openai.com/v1/images/edits",
@@ -363,6 +382,8 @@ class MagicGenerationWorker:
         for path in sorted(self.queue_dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
+                if payload.get("status") == "failed":
+                    continue
                 if float(payload.get("next_attempt_at") or 0) <= now:
                     return path, payload
             except (OSError, ValueError, json.JSONDecodeError):
@@ -397,6 +418,26 @@ class MagicGenerationWorker:
         if self.on_ready:
             self.on_ready(str(output), dict(job))
 
+    def _record_failure(self, path: Path, job: dict, exc: Exception) -> bool:
+        attempts = int(job.get("attempts") or 0) + 1
+        job["attempts"] = attempts
+        job["last_error"] = str(exc)[:500]
+        failed = attempts >= MAX_AUTO_ATTEMPTS
+        job["status"] = "failed" if failed else "retrying"
+        job["next_attempt_at"] = (
+            0 if failed
+            else time.time() + min(300, 15 * (2 ** min(attempts - 1, 4)))
+        )
+        _atomic_json(path, job)
+        source = Path(str(job.get("source_path") or ""))
+        self._write_source_state(
+            source, job, job["status"], attempts=attempts,
+            last_error=job["last_error"],
+        )
+        if self.on_error:
+            self.on_error(exc, dict(job))
+        return failed
+
     def _run(self) -> None:
         while not self._stop.is_set():
             next_job = self._next_job()
@@ -408,13 +449,38 @@ class MagicGenerationWorker:
             try:
                 self._process(path, job)
             except Exception as exc:
-                attempts = int(job.get("attempts") or 0) + 1
-                job["attempts"] = attempts
-                job["last_error"] = str(exc)[:500]
-                job["next_attempt_at"] = time.time() + min(300, 15 * (2 ** min(attempts - 1, 4)))
-                _atomic_json(path, job)
-                source = Path(str(job.get("source_path") or ""))
-                self._write_source_state(source, job, "retrying", attempts=attempts)
-                if self.on_error:
-                    self.on_error(exc, dict(job))
-                self._wake.wait(min(5, max(1, job["next_attempt_at"] - time.time())))
+                failed = self._record_failure(path, job, exc)
+                if not failed:
+                    self._wake.wait(min(5, max(1, job["next_attempt_at"] - time.time())))
+
+
+def retry_magic_generation(home: str | Path, source_path: str | Path) -> dict:
+    """Reset a failed/pending retry job so the camera worker runs it now."""
+    home = Path(home).resolve()
+    source = Path(source_path).resolve()
+    photos_dir = (home / "photos").resolve()
+    if source.parent != photos_dir or not source.is_file():
+        raise FileNotFoundError("Magic source photo was not found")
+
+    metadata = read_magic_source_metadata(source)
+    if not metadata or metadata.get("status") not in {"failed", "retrying"}:
+        raise ValueError("Magic photo is not waiting for a retry")
+    job_id = str(metadata.get("job_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9-]+", job_id):
+        raise FileNotFoundError("Magic retry job was not found")
+
+    job_path = home / "magic_queue" / f"{job_id}.json"
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise FileNotFoundError("Magic retry job was not found") from exc
+    if Path(str(job.get("source_path") or "")).resolve() != source:
+        raise ValueError("Magic retry job does not match this photo")
+
+    job["attempts"] = 0
+    job["next_attempt_at"] = 0
+    job["status"] = "queued"
+    job.pop("last_error", None)
+    _atomic_json(job_path, job)
+    MagicGenerationWorker._write_source_state(source, job, "queued", attempts=0)
+    return dict(job)

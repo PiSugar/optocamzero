@@ -24,6 +24,7 @@ from magic_service import (  # noqa: E402
     mask_api_key,
     normalize_magic_modes,
     read_magic_source_metadata,
+    retry_magic_generation,
     save_magic_connection_settings,
 )
 
@@ -70,8 +71,30 @@ class MagicServiceTests(unittest.TestCase):
                 save_magic_connection_settings(Path(directory) / ".env", proxy="socks5://localhost:1080")
 
     def test_image_editor_defaults_to_square_output(self):
-        with patch.dict(os.environ, {"OPTOCAM_MAGIC_SIZE": ""}):
-            self.assertEqual(OpenAIImageEditor().size, "1024x1024")
+        with patch.dict(os.environ, {
+            "OPTOCAM_MAGIC_SIZE": "",
+            "OPTOCAM_MAGIC_QUALITY": "",
+            "OPTOCAM_MAGIC_INPUT_FIDELITY": "",
+            "OPTOCAM_MAGIC_OUTPUT_COMPRESSION": "",
+        }):
+            editor = OpenAIImageEditor()
+            self.assertEqual(editor.size, "1024x1024")
+            self.assertEqual(editor.quality, "high")
+            self.assertEqual(editor.input_fidelity, "high")
+            self.assertEqual(editor.output_compression, "95")
+
+    def test_image_editor_sends_high_quality_fields(self):
+        editor = OpenAIImageEditor({
+            "OPTOCAM_MAGIC_MODEL": "chatgpt-image-latest",
+            "OPTOCAM_MAGIC_QUALITY": "high",
+            "OPTOCAM_MAGIC_INPUT_FIDELITY": "high",
+            "OPTOCAM_MAGIC_OUTPUT_COMPRESSION": "95",
+        })
+        fields = editor._request_fields("Turn it into cheese")
+        self.assertEqual(fields["quality"], "high")
+        self.assertEqual(fields["input_fidelity"], "high")
+        self.assertEqual(fields["output_compression"], "95")
+        self.assertEqual(fields["size"], "1024x1024")
 
     @unittest.skipIf(PILImage is None, "Pillow is not installed")
     def test_image_editor_compresses_upload_source_to_512_square(self):
@@ -114,6 +137,30 @@ class MagicServiceTests(unittest.TestCase):
             self.assertEqual(source_state["status"], "complete")
             self.assertEqual(source_state["output"], output.name)
             self.assertEqual(len(ready), 1)
+
+    def test_failed_job_stops_after_three_attempts_and_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "photos").mkdir()
+            source = home / "photos" / "Optocamzero_1.jpg"
+            source.write_bytes(b"source")
+            worker = MagicGenerationWorker(home, lambda: "Optocamzero_2.jpg")
+            self.assertTrue(worker.enqueue(source, "cheese"))
+            job_path = next((home / "magic_queue").glob("*.json"))
+            job = json.loads(job_path.read_text())
+
+            self.assertFalse(worker._record_failure(job_path, job, RuntimeError("one")))
+            self.assertFalse(worker._record_failure(job_path, job, RuntimeError("two")))
+            self.assertTrue(worker._record_failure(job_path, job, RuntimeError("three")))
+            self.assertEqual(read_magic_source_metadata(source)["status"], "failed")
+            self.assertIsNone(worker._next_job())
+
+            retried = retry_magic_generation(home, source)
+            self.assertEqual(retried["status"], "queued")
+            self.assertEqual(retried["attempts"], 0)
+            self.assertNotIn("last_error", retried)
+            self.assertEqual(read_magic_source_metadata(source)["status"], "queued")
+            self.assertIsNotNone(worker._next_job())
 
     def test_worker_hot_loads_key_and_proxy_for_each_job(self):
         with tempfile.TemporaryDirectory() as directory:

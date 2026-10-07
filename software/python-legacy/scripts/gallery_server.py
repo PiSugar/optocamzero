@@ -28,6 +28,7 @@ from magic_service import (
     is_ai_generated,
     read_magic_source_metadata,
     read_magic_connection_settings,
+    retry_magic_generation,
     save_magic_connection_settings,
 )
 
@@ -311,7 +312,7 @@ header {
     z-index: 2;
     pointer-events: none;
 }
-.magic-badge, .magic-processing-badge {
+.magic-badge, .magic-processing-badge, .magic-retry-badge {
     position: absolute;
     bottom: 7px;
     width: 28px;
@@ -342,6 +343,17 @@ header {
     border-radius: 50%;
     animation: spin .8s linear infinite;
 }
+.magic-retry-badge {
+    right: 7px;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,0.5);
+    color: #fff;
+    background: rgba(180,55,45,0.92);
+    cursor: pointer;
+    pointer-events: auto;
+}
+.magic-retry-badge svg { width: 17px; height: 17px; }
+.magic-retry-badge.busy { opacity: .55; pointer-events: none; }
 .audio-badge {
     position: absolute;
     bottom: 7px;
@@ -997,6 +1009,7 @@ body:has(#sel-bar.open) #dl-progress {
       {% if f in ai_set %}<span class="ai-badge" aria-label="AI generated">AI</span>{% endif %}
       {% if f in magic_set %}<span class="magic-badge" aria-label="Magic mode photo" title="Magic mode photo"><svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M5 15L15 5M12.5 3.5l4 4M4 3v3M2.5 4.5h3M15.5 13v4M13.5 15h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>{% endif %}
       {% if f in magic_processing_set %}<span class="magic-processing-badge" aria-label="AI processing" title="AI processing"></span>{% endif %}
+      {% if f in magic_retry_set %}<button class="magic-retry-badge" aria-label="Retry AI generation" title="AI generation failed — click to retry" onclick="retryMagic(event,this)"><svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M15.5 7A6 6 0 1 0 16 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/><path d="M15.5 3v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>{% endif %}
       <button class="sel-circle" onclick="toggleSel(event, this)"></button>
       <a class="dl-icon" href="/photo/{{ f }}" download="{{ f }}" onclick="downloadFile(event, '{{ f }}')">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
@@ -1139,9 +1152,65 @@ const selected = new Set();
 let magicModes = {{ magic_modes_json | safe }};
 let magicSettings = {{ magic_settings_json | safe }};
 let magicPhotoStates = {{ magic_photo_states_json | safe }};
+let magicPollTimer = null;
+
+function scheduleMagicPoll(delay) {
+    if (magicPollTimer !== null) return;
+    magicPollTimer = setTimeout(() => {
+        magicPollTimer = null;
+        pollMagicPhotoStates();
+    }, delay);
+}
 
 function magicStatusIsProcessing(status) {
     return status === 'queued' || status === 'processing' || status === 'retrying';
+}
+
+function renderMagicState(item, state) {
+    item.querySelectorAll('.magic-processing-badge,.magic-retry-badge').forEach(el => el.remove());
+    if (!state) return;
+    if (state.status === 'queued' || state.status === 'processing') {
+        const badge = document.createElement('span');
+        badge.className = 'magic-processing-badge';
+        badge.setAttribute('aria-label', 'AI processing');
+        badge.title = 'AI processing';
+        item.querySelector('.img-wrap')?.appendChild(badge);
+    } else if (state.status === 'retrying' || state.status === 'failed') {
+        const button = document.createElement('button');
+        button.className = 'magic-retry-badge';
+        button.setAttribute('aria-label', 'Retry AI generation');
+        const attempts = Number(state.attempts || 0);
+        button.title = 'AI generation failed' + (attempts ? ' after ' + attempts + ' attempt(s)' : '') + ' — click to retry';
+        button.innerHTML = '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M15.5 7A6 6 0 1 0 16 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/><path d="M15.5 3v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
+        button.onclick = event => retryMagic(event, button);
+        item.querySelector('.img-wrap')?.appendChild(button);
+    }
+}
+
+async function retryMagic(event, button) {
+    event.preventDefault();
+    event.stopPropagation();
+    const item = button.closest('.item');
+    if (!item || button.classList.contains('busy')) return;
+    const filename = item.dataset.file;
+    button.classList.add('busy');
+    button.title = 'Queuing retry…';
+    try {
+        const response = await fetch('/api/magic-photo-retry', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({filename})
+        });
+        if (!response.ok) throw new Error((await response.text()) || 'Retry request failed');
+        const payload = await response.json();
+        magicPhotoStates[filename] = payload.state;
+        renderMagicState(item, payload.state);
+        scheduleMagicPoll(500);
+    } catch (error) {
+        button.classList.remove('busy');
+        button.title = 'Retry failed — click to try again';
+        window.alert('AI retry failed: ' + error.message);
+    }
 }
 
 async function pollMagicPhotoStates() {
@@ -1157,8 +1226,7 @@ async function pollMagicPhotoStates() {
             const after = nextStates[filename];
             if (before && magicStatusIsProcessing(before.status)
                     && after && !magicStatusIsProcessing(after.status)) completed = true;
-            const badge = item.querySelector('.magic-processing-badge');
-            if (badge && (!after || !magicStatusIsProcessing(after.status))) badge.remove();
+            renderMagicState(item, after);
         });
         magicPhotoStates = nextStates;
         if (completed && !magicEditorIsOpen()
@@ -1170,10 +1238,10 @@ async function pollMagicPhotoStates() {
         // A brief network interruption should not remove the processing icon.
     }
     if (Object.values(magicPhotoStates).some(item => magicStatusIsProcessing(item.status))) {
-        setTimeout(pollMagicPhotoStates, 3000);
+        scheduleMagicPoll(3000);
     }
 }
-setTimeout(pollMagicPhotoStates, 1500);
+scheduleMagicPoll(1500);
 
 function renderMagicSettings() {
     const state = document.getElementById('magic-key-state');
@@ -1972,7 +2040,7 @@ document.addEventListener('mousedown', e => {
     if (window.innerWidth < 1200) return;
     if (magicEditorIsOpen() || e.target.closest('#magic-overlay,#confirm-overlay')) return;
     if (document.getElementById('viewer').classList.contains('open')) return;
-    const blocked = e.target.closest('.img-btn,.sel-circle,.dl-icon,#sel-bar,#top-btn,header');
+    const blocked = e.target.closest('.img-btn,.sel-circle,.dl-icon,.magic-retry-badge,#sel-bar,#top-btn,header');
     if (blocked) return;
     dragStart = { x: e.clientX, y: e.clientY };
     dragMoved = false;
@@ -2175,6 +2243,19 @@ def json_for_script(value):
             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
 
+def magic_browser_state(metadata, default_status="complete"):
+    """Expose only the small, non-sensitive subset the gallery UI needs."""
+    try:
+        attempts = max(0, int(metadata.get("attempts") or 0))
+    except (TypeError, ValueError):
+        attempts = 0
+    return {
+        "status": str(metadata.get("status") or default_status),
+        "title": str(metadata.get("magic_mode_title") or metadata.get("title") or "Magic")[:18],
+        "attempts": attempts,
+    }
+
+
 def get_magic_photo_states(files=None):
     """Return browser-safe Magic state keyed by original photo filename."""
     files = files if files is not None else list_media()
@@ -2183,10 +2264,7 @@ def get_magic_photo_states(files=None):
     for filename in files:
         metadata = read_magic_source_metadata(os.path.join(PHOTOS_DIR, filename))
         if metadata:
-            states[filename] = {
-                "status": str(metadata.get("status") or "complete"),
-                "title": str(metadata.get("magic_mode_title") or "Magic")[:18],
-            }
+            states[filename] = magic_browser_state(metadata)
 
     # Backfill photos made before source-state sidecars were introduced by
     # following the source reference already stored on generated AI photos.
@@ -2197,10 +2275,7 @@ def get_magic_photo_states(files=None):
                 metadata = json.load(handle)
             source_name = os.path.basename(str(metadata.get("source") or ""))
             if source_name in known_files:
-                states.setdefault(source_name, {
-                    "status": "complete",
-                    "title": str(metadata.get("magic_mode_title") or "Magic")[:18],
-                })
+                states.setdefault(source_name, magic_browser_state(metadata))
         except (OSError, ValueError, json.JSONDecodeError):
             continue
 
@@ -2219,10 +2294,7 @@ def get_magic_photo_states(files=None):
                 job = json.load(handle)
             filename = os.path.basename(str(job.get("source_path") or ""))
             if filename in known_files:
-                states.setdefault(filename, {
-                    "status": "queued",
-                    "title": str(job.get("title") or "Magic")[:18],
-                })
+                states.setdefault(filename, magic_browser_state(job, "queued"))
         except (OSError, ValueError, json.JSONDecodeError):
             continue
     return states
@@ -2253,7 +2325,11 @@ def index():
         magic_set=set(magic_photo_states),
         magic_processing_set={
             name for name, state in magic_photo_states.items()
-            if state["status"] in {"queued", "processing", "retrying"}
+            if state["status"] in {"queued", "processing"}
+        },
+        magic_retry_set={
+            name for name, state in magic_photo_states.items()
+            if state["status"] in {"retrying", "failed"}
         },
         count=len(files), has_media=bool(files),
         free_space=get_free_space(),
@@ -2332,6 +2408,28 @@ def magic_settings_api():
 def magic_photo_status_api():
     return Response(
         json.dumps({"photos": get_magic_photo_states()}, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.route("/api/magic-photo-retry", methods=["POST"])
+def magic_photo_retry_api():
+    data = request.get_json(silent=True)
+    filename = data.get("filename") if isinstance(data, dict) else None
+    if (not isinstance(filename, str) or filename != os.path.basename(filename)
+            or not filename.lower().endswith(".jpg")):
+        return Response("Invalid photo", status=400, mimetype="text/plain")
+    source = os.path.join(PHOTOS_DIR, filename)
+    try:
+        retry_magic_generation(OPTOCAM_HOME, source)
+    except FileNotFoundError as exc:
+        return Response(str(exc), status=404, mimetype="text/plain")
+    except ValueError as exc:
+        return Response(str(exc), status=409, mimetype="text/plain")
+    metadata = read_magic_source_metadata(source) or {"status": "queued"}
+    return Response(
+        json.dumps({"state": magic_browser_state(metadata, "queued")}, ensure_ascii=False),
         mimetype="application/json",
         headers={"Cache-Control": "no-store"},
     )
